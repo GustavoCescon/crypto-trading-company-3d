@@ -32,7 +32,14 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventPayload {
-    ServiceStarted { service: String, version: String },
+    ServiceStarted {
+        service: String,
+        version: String,
+    },
+    Activity {
+        kind: String,
+        data: serde_json::Value,
+    },
 }
 
 impl EventEnvelope {
