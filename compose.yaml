@@ -1,0 +1,78 @@
+name: crypto-trading-company-3d
+services:
+  postgres:
+    image: timescale/timescaledb:2.22.0-pg17
+    environment:
+      POSTGRES_USER: ctc
+      POSTGRES_DB: ctc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U ctc -d ctc']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, everysec]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  api:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+      REDIS_URL: redis://redis:6379
+      TRADING_MODE: ${TRADING_MODE:-simulated}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:8080:8080
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/health/ready]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      target: development
+    environment:
+      DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      api:
+        condition: service_healthy
+    command: [cargo, test, --locked, --workspace, --, --include-ignored]
+  smoke:
+    profiles: [test]
+    image: python:3.13.7-slim
+    volumes:
+      - ./tests:/tests:ro
+    environment:
+      API_URL: http://api:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    command: [python, -m, unittest, discover, -s, /tests, -v]
+volumes:
+  postgres-data:
+  redis-data:
