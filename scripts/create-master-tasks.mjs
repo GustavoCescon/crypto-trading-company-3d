@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+if (existsSync('docs/tasks/README.md')) throw new Error('As tarefas já existem. Edite os checklists sem sobrescrever o progresso.')
 const tasks = [
  ['principios','Princípios fundamentais',1,'Trabalhadores lógicos com tarefas reais;Autonomia limitada por políticas;Ferramentas, memória e histórico por agente;Decisões com evidências;Risco determinístico incontornável;Avatares vinculados ao backend;Interface pt-BR sem JSON;Capital inicial fictício de R$ 1.000;Métricas líquidas, risco e custos;Qualidade visual sem promessa de rentabilidade'],
  ['stack','Preservação da stack',1,'Rust, Tokio e Axum;PostgreSQL e TimescaleDB;Redis Streams, WebSocket, migrations e auditoria;Python e orquestração multiagente;Ollama em Docker e provedores alternativos;Tool calling validado;Vue 3, TypeScript, Pinia, TresJS e Three.js;GLB e animações;Compose, health checks, logs, métricas, testes e CI'],

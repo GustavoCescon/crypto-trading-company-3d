@@ -50,7 +50,7 @@ async fn exposure(
     let peak: Decimal = row.get("peak_equity");
     let mut day_start: Decimal = row.get("day_start_equity");
     let day: chrono::NaiveDate = row.get("trading_day");
-    let (total,asset,count,stale):(Decimal,Decimal,i64,i64)=sqlx::query_as("SELECT COALESCE(sum(COALESCE(p.quantity*q.price,p.cost)),0),COALESCE(sum(CASE WHEN p.symbol=$1 THEN COALESCE(p.quantity*q.price,p.cost) ELSE 0 END),0),count(*),count(*) FILTER(WHERE q.observed_at IS NULL OR q.observed_at<now()-interval '30 seconds') FROM positions p LEFT JOIN quotes q USING(symbol)")
+    let (total,asset,count,stale):(Decimal,Decimal,i64,i64)=sqlx::query_as("SELECT COALESCE(sum(COALESCE(p.quantity*q.price*f.price,p.cost)),0),COALESCE(sum(CASE WHEN p.symbol=$1 THEN COALESCE(p.quantity*q.price*f.price,p.cost) ELSE 0 END),0),count(*),count(*) FILTER(WHERE q.observed_at IS NULL OR q.observed_at<now()-interval '30 seconds' OR f.observed_at IS NULL OR f.observed_at<now()-interval '60 seconds') FROM positions p LEFT JOIN quotes q USING(symbol) LEFT JOIN fx_quotes f ON f.pair='USDTBRL'")
         .bind(symbol).fetch_one(&mut **tx).await?;
     let (reserved,new_positions):(Decimal,i64)=sqlx::query_as("SELECT COALESCE(sum(reserved),0),count(*) FILTER(WHERE side='BUY' AND NOT EXISTS(SELECT 1 FROM positions p WHERE p.symbol=i.symbol)) FROM intents i WHERE status='APPROVED' AND id<>$1")
         .bind(exclude).fetch_one(&mut **tx).await?;
@@ -179,6 +179,39 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
     let filters: Value = q.get("filters");
     let filters_updated: DateTime<Utc> = q.get("filters_updated");
     let e = exposure(&mut tx, &symbol, id).await?;
+    let fx: Option<(Decimal, DateTime<Utc>)> =
+        sqlx::query_as("SELECT price,observed_at FROM fx_quotes WHERE pair='USDTBRL'")
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((fx_rate, fx_time)) = fx else {
+        reject(
+            &mut tx,
+            id,
+            &symbol,
+            "Cotacao USDT/BRL indisponivel; conversao nao estimada",
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Some(
+            json!({"symbol":symbol,"state":"BLOCKED","reason":"Cotacao USDT/BRL indisponivel"}),
+        ));
+    };
+    if fx_rate <= d("0")
+        || Utc::now().signed_duration_since(fx_time).num_seconds() > 60
+        || fx_time > Utc::now() + chrono::Duration::seconds(5)
+    {
+        reject(
+            &mut tx,
+            id,
+            &symbol,
+            "CotaÃ§Ã£o USDT/BRL desatualizada; conversÃ£o nÃ£o estimada",
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Some(
+            json!({"symbol":symbol,"state":"BLOCKED","reason":"CotaÃ§Ã£o USDT/BRL desatualizada"}),
+        ));
+    }
     let existing: Option<(Decimal,)> =
         sqlx::query_as("SELECT quantity FROM positions WHERE symbol=$1")
             .bind(&symbol)
@@ -186,13 +219,17 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
             .await?;
     let buy = side == "BUY";
     let fp = fill_price(price, buy, l);
+    let allowed_brl = l
+        .order_budget
+        .min((e.equity * l.max_asset_fraction - e.asset).max(d("0")))
+        .min((e.cash - e.reserved).max(d("0")));
     let qty = if buy {
-        quantity(l.order_budget, fp, lot_step(&filters)?, l.fee_bps)
+        quantity(allowed_brl, fp * fx_rate, lot_step(&filters)?, l.fee_bps)
     } else {
         existing.map(|r| r.0).unwrap_or(d("0"))
     };
     let reserve = if buy {
-        qty * fp * (d("1") + l.fee_bps / d("10000")) * d("1.01")
+        qty * fp * fx_rate * (d("1") + l.fee_bps / d("10000")) * d("1.01")
     } else {
         d("0")
     };
@@ -235,8 +272,8 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
             json!({"symbol":symbol,"state":"BLOCKED","reason":reason})
         }
         Ok(()) => {
-            let explanation = format!("Orçamento máximo de {} USDT; quantidade {} após arredondamento ao lote. Inclui taxa de {} pontos-base e reserva adicional de 1%. A aprovação respeita saldo, exposição e perdas. Valores legados em USDT, sem conversão para reais.", l.order_budget, qty, l.fee_bps);
-            let snapshot = json!({"limits":l,"price":price,"quote_time":observed,"equity":e.equity,"cash":e.cash,"reserved_before":e.reserved,"filters":filters,"rules_version":"risk-1.0.0","sizing_explanation":explanation,"currency":"USDT"});
+            let explanation = format!("Orcamento configurado de ate R$ {}; limite disponivel por ativo R$ {}; cambio USDT/BRL R$ {}/USDT; preco de referencia {} USDT. Quantidade arredondada ao lote com reserva de 1% e taxa de {} pontos-base; exposicao maxima de {:.0}% do patrimonio.", l.order_budget, allowed_brl, fx_rate, price, l.fee_bps,l.max_total_fraction*d("100"));
+            let snapshot = json!({"limits":l,"price":price,"quote_time":observed,"fx_rate":fx_rate,"fx_time":fx_time,"equity":e.equity,"cash":e.cash,"reserved_before":e.reserved,"filters":filters,"rules_version":"risk-1.1.0","sizing_explanation":explanation,"account_currency":"BRL","quote_currency":"USDT"});
             sqlx::query("UPDATE intents SET status='APPROVED',quantity=$2,reserved=$3,approved_at=now(),risk_reason='Limites e filtros aprovados',risk_snapshot=$4 WHERE id=$1")
                 .bind(id).bind(qty).bind(reserve).bind(snapshot).execute(&mut *tx).await?;
             db::activity(&mut tx,"risk","risk_approved",json!({"intent_id":id,"symbol":symbol,"side":side,"quantity":qty,"reserved":reserve})).await?;
@@ -280,8 +317,20 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
     let price: Option<Decimal> = row.get("price");
     let observed: Option<DateTime<Utc>> = row.get("observed_at");
     let reference = db::decimal(&snap["price"])?;
+    let approved_fx = db::decimal(&snap["fx_rate"])?;
+    let current_fx: Option<(Decimal, DateTime<Utc>)> =
+        sqlx::query_as("SELECT price,observed_at FROM fx_quotes WHERE pair='USDTBRL'")
+            .fetch_optional(&mut *tx)
+            .await?;
+    let fx_valid = current_fx.as_ref().is_some_and(|(rate, stamp)| {
+        *rate > Decimal::ZERO
+            && Utc::now().signed_duration_since(*stamp).num_seconds() <= 60
+            && *stamp <= Utc::now() + chrono::Duration::seconds(5)
+            && (*rate / approved_fx - Decimal::ONE).abs() <= d("0.01")
+    });
     if expires <= Utc::now()
         || price.is_none()
+        || !fx_valid
         || observed.is_none_or(|t| {
             Utc::now().signed_duration_since(t).num_seconds() > 30
                 || t > Utc::now() + chrono::Duration::seconds(5)
@@ -305,7 +354,8 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
     let price = price.unwrap();
     let buy = side == "BUY";
     let fill = SimulatedExchangeAdapter.execute(price, qty, buy, l);
-    let gross = qty * fill.price;
+    let fx_rate = approved_fx;
+    let gross = qty * fill.price * fx_rate;
     let e = exposure(&mut tx, &symbol, id).await?;
     let previous: Option<(Decimal, Decimal, String)> =
         sqlx::query_as("SELECT quantity,cost,strategy FROM positions WHERE symbol=$1")
@@ -313,7 +363,7 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
             .fetch_optional(&mut *tx)
             .await?;
     if buy {
-        if let Err(reason) = veto(l, &e, gross + fill.fee, 0, 0) {
+        if let Err(reason) = veto(l, &e, gross + fill.fee * fx_rate, 0, 0) {
             reject(&mut tx, id, &symbol, &format!("Revalidação: {reason}")).await?;
             tx.commit().await?;
             return Ok(Some(
@@ -325,7 +375,7 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
         tx.commit().await?;
         return Ok(None);
     }
-    order_filters(&snap["filters"], qty, gross)?;
+    order_filters(&snap["filters"], qty, qty * fill.price)?;
     let decision_id: Option<Uuid> = row.get("decision_id");
     let strategy = if buy {
         let decision: Option<(Value,)> = sqlx::query_as("SELECT detail FROM decisions WHERE id=$1")
@@ -348,16 +398,16 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
     let realized = if buy {
         d("0")
     } else {
-        gross - fill.fee - previous.as_ref().unwrap().1
+        gross - fill.fee * fx_rate - previous.as_ref().unwrap().1
     };
     // Insert is guarded by a DB trigger requiring the exact risk-approved intent.
-    sqlx::query("INSERT INTO fills(id,intent_id,symbol,side,quantity,price,reference_price,fee,slippage_cost,realized_pnl,strategy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
-        .bind(Uuid::new_v4()).bind(id).bind(&symbol).bind(&side).bind(qty).bind(fill.price).bind(price).bind(fill.fee).bind(fill.slippage_cost).bind(realized).bind(&strategy).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO fills(id,intent_id,symbol,side,quantity,price,reference_price,fee,slippage_cost,realized_pnl,strategy,fx_rate,account_currency,quote_currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'BRL','USDT')")
+        .bind(Uuid::new_v4()).bind(id).bind(&symbol).bind(&side).bind(qty).bind(fill.price).bind(price).bind(fill.fee*fx_rate).bind(fill.slippage_cost*fx_rate).bind(realized).bind(&strategy).bind(fx_rate).execute(&mut *tx).await?;
     if buy {
         sqlx::query("INSERT INTO positions(symbol,quantity,cost,strategy) VALUES($1,$2,$3,$4)")
             .bind(&symbol)
             .bind(qty)
-            .bind(gross + fill.fee)
+            .bind(gross + fill.fee * fx_rate)
             .bind(&strategy)
             .execute(&mut *tx)
             .await?;
@@ -368,12 +418,12 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
             .await?;
     }
     sqlx::query("UPDATE wallet SET cash=cash+$1,realized_pnl=realized_pnl+$2,fees=fees+$3,updated_at=now() WHERE id=1")
-        .bind(if buy{-gross-fill.fee}else{gross-fill.fee}).bind(realized).bind(fill.fee).execute(&mut *tx).await?;
+        .bind(if buy{-gross-fill.fee*fx_rate}else{gross-fill.fee*fx_rate}).bind(realized).bind(fill.fee*fx_rate).execute(&mut *tx).await?;
     sqlx::query("UPDATE intents SET status='FILLED',reserved=0 WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    db::activity(&mut tx,"execution","paper_fill",json!({"intent_id":id,"symbol":symbol,"side":side,"quantity":qty,"price":fill.price,"fee":fill.fee,"realized_pnl":realized,"simulated":true})).await?;
+    db::activity(&mut tx,"execution","paper_fill",json!({"intent_id":id,"symbol":symbol,"side":side,"quantity":qty,"price_usdt":fill.price,"fx_usdtbrl":fx_rate,"fee_brl":fill.fee*fx_rate,"realized_pnl_brl":realized,"simulated":true})).await?;
     tx.commit().await?;
     Ok(Some(
         json!({"symbol":symbol,"side":side,"state":"EXECUTING","quantity":qty,"price":fill.price,"simulated":true}),
@@ -387,7 +437,7 @@ async fn monitor(pool: &PgPool, l: &RiskLimits) -> Result<(), Error> {
             .fetch_one(&mut *tx)
             .await?;
     sqlx::query("INSERT INTO equity_history(observed_at,equity,cash,exposure) VALUES(now(),$1,$2,$3) ON CONFLICT DO NOTHING").bind(e.equity).bind(e.cash).bind(e.total).execute(&mut *tx).await?;
-    let rows:Vec<(String,Decimal,Decimal,Decimal)>=sqlx::query_as("SELECT p.symbol,p.quantity,p.cost,q.price FROM positions p JOIN quotes q USING(symbol) WHERE q.observed_at>now()-interval '30 seconds'").fetch_all(&mut *tx).await?;
+    let rows:Vec<(String,Decimal,Decimal,Decimal)>=sqlx::query_as("SELECT p.symbol,p.quantity,p.cost,q.price*f.price FROM positions p JOIN quotes q USING(symbol) JOIN fx_quotes f ON f.pair='USDTBRL' WHERE q.observed_at>now()-interval '30 seconds' AND f.observed_at>now()-interval '60 seconds'").fetch_all(&mut *tx).await?;
     for (symbol, qty, cost, price) in rows {
         let change = qty * price / cost - d("1");
         if stopping || change <= -l.stop_loss_fraction || change >= l.take_profit_fraction {
@@ -514,5 +564,18 @@ mod tests {
         assert!(a.price > d("100"));
         assert!(b.price < d("100"));
         assert!(a.fee > d("0"));
+    }
+
+    #[test]
+    fn brl_budget_converts_to_usdt_quantity_without_exceeding_asset_limit() {
+        let l = RiskLimits::default();
+        let rate = d("5");
+        let budget = d("150");
+        let qty = quantity(budget, d("100") * rate, d("0.01"), l.fee_bps);
+        let notional_brl = qty * d("100") * rate * (d("1") + l.fee_bps / d("10000"));
+        assert!(notional_brl <= budget);
+        assert_eq!(l.initial_balance, d("1000"));
+        assert_eq!(l.max_positions, 5);
+        assert_eq!(l.max_total_fraction, d("0.3"));
     }
 }

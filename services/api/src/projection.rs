@@ -11,6 +11,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use sqlx::types::{chrono, Decimal};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -105,7 +106,19 @@ pub async fn backtest(
         .fetch_one(&state.pool)
         .await
         .map_err(|_| invalid("Carteira indisponível"))?;
-    let limits = serde_json::from_value(limits).map_err(|_| invalid("Limites inválidos"))?;
+    let mut limits: ctc_domain::risk::RiskLimits =
+        serde_json::from_value(limits).map_err(|_| invalid("Limites inválidos"))?;
+    let (fx_rate, fx_time): (Decimal, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT price,observed_at FROM fx_quotes WHERE pair='USDTBRL' AND observed_at BETWEEN now()-interval '60 seconds' AND now()+interval '5 seconds'")
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|_| invalid("Cotação de câmbio indisponível"))?
+            .ok_or_else(|| invalid("Aguardando primeira cotação USDT/BRL"))?;
+    if fx_rate <= Decimal::ZERO || (chrono::Utc::now() - fx_time).num_seconds() > 60 {
+        return Err(invalid("Cotação USDT/BRL desatualizada"));
+    }
+    limits.initial_balance /= fx_rate;
+    limits.order_budget /= fx_rate;
     let hash = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&candles).map_err(|_| invalid("Dados inválidos"))?)
@@ -127,6 +140,8 @@ pub async fn backtest(
         .await
         .map_err(|_| invalid("Falha ao persistir resultado"))?;
     Ok(Json(
-        json!({"id":id,"symbol":request.symbol,"report":report,"dataset_hash":hash}),
+        json!({"id":id,"symbol":request.symbol,"report":report,"dataset_hash":hash,
+            "valuation":{"source":"binance-public-ticker","pair":"USDTBRL","rate":fx_rate,"observed_at":fx_time,
+                "starting_capital_brl":1000,"currency":"USDT","historical_fx_included":false}}),
     ))
 }

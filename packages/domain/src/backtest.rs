@@ -81,7 +81,8 @@ pub fn run(data: &[Candle], l: &RiskLimits, split: &str) -> Result<Report, Strin
         } else if qty == Decimal::ZERO && decision.action == "BUY" {
             let execution = fill_price(price, true, l);
             qty = quantity(
-                cash.min(l.order_budget),
+                cash.min(l.order_budget)
+                    .min(l.initial_balance * l.max_asset_fraction),
                 execution,
                 d("0.00000001"),
                 l.fee_bps,

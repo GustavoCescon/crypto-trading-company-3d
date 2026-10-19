@@ -8,6 +8,7 @@ use std::{collections::HashSet, time::Duration};
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+#[derive(Clone)]
 struct PublicClient {
     client: reqwest::Client,
     base: String,
@@ -95,6 +96,18 @@ pub fn eligible(s: &Value) -> bool {
         && !base.ends_with("DOWN")
         && !base.ends_with("BULL")
         && !base.ends_with("BEAR")
+}
+async fn refresh_brl_rate(pool: &PgPool, client: &PublicClient) -> Result<(), Error> {
+    // Binance documents ticker/price as a public market-data endpoint. Persist
+    // the observation time and source; stale FX blocks new fills fail-closed.
+    let value = client.get("/api/v3/ticker/price?symbol=USDTBRL").await?;
+    let rate = db::decimal(&value["price"])?;
+    if rate <= rust_decimal::Decimal::ZERO {
+        return Err("invalid USDT/BRL rate".into());
+    }
+    sqlx::query("INSERT INTO fx_quotes(pair,price,observed_at,source) VALUES('USDTBRL',$1,now(),'binance-public-ticker') ON CONFLICT(pair) DO UPDATE SET price=$1,observed_at=now(),source='binance-public-ticker'")
+        .bind(rate).execute(pool).await?;
+    Ok(())
 }
 async fn exchange_info(pool: &PgPool, client: &PublicClient) -> Result<(), Error> {
     let info = client
@@ -494,6 +507,17 @@ async fn websocket(pool: PgPool, mut selected: watch::Receiver<Vec<String>>) {
 }
 pub async fn run(pool: PgPool) -> Result<(), Error> {
     let client = PublicClient::new()?;
+    let fx_pool = pool.clone();
+    let fx_client = client.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            if let Err(error) = refresh_brl_rate(&fx_pool, &fx_client).await {
+                tracing::warn!(error=%error,"USDT/BRL quote refresh failed; trading blocks on stale FX");
+            }
+        }
+    });
     let (sender, receiver) = watch::channel(vec![]);
     tokio::spawn(websocket(pool.clone(), receiver));
     let mut last_info = std::time::Instant::now() - Duration::from_secs(7200);

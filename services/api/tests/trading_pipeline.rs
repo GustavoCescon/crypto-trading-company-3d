@@ -33,6 +33,7 @@ async fn risk_gate_idempotency_concurrency_and_ledger() {
     ctc_api::MIGRATOR.run(&pool).await.unwrap();
     let l = RiskLimits::default();
     db::init_wallet(&pool, &l).await.unwrap();
+    sqlx::query("INSERT INTO fx_quotes(pair,price,observed_at,source) VALUES('USDTBRL',5,now(),'isolated-test-fixture')").execute(&pool).await.unwrap();
     // Existing trading pipeline runs only after the company is explicitly ready.
     sqlx::query("UPDATE company_runtime SET state='RUNNING' WHERE id=1")
         .execute(&pool)

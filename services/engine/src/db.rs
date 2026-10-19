@@ -55,6 +55,11 @@ pub async fn agent(
 }
 pub fn limits_from_env() -> Result<RiskLimits, Error> {
     let mut l = RiskLimits::default();
+    if let Ok(currency) = std::env::var("ACCOUNT_CURRENCY") {
+        if currency != "BRL" {
+            return Err("ACCOUNT_CURRENCY must be BRL".into());
+        }
+    }
     macro_rules! env_decimal {
         ($field:ident,$key:expr) => {
             if let Ok(v) = std::env::var($key) {
@@ -75,6 +80,13 @@ pub fn limits_from_env() -> Result<RiskLimits, Error> {
     env_decimal!(slippage_bps, "SLIPPAGE_BPS");
     if let Ok(v) = std::env::var("MAX_POSITIONS") {
         l.max_positions = v.parse()?;
+    }
+    if l.initial_balance != d("1000")
+        || l.max_total_fraction > d("0.30")
+        || l.max_asset_fraction > d("0.30")
+        || l.max_positions > 5
+    {
+        return Err("Configured capital and risk must respect BRL 1,000, 30% total exposure, 30% per asset and at most 5 positions".into());
     }
     l.validate()?;
     Ok(l)
@@ -109,13 +121,22 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         .await?;
     let agents:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(a)||jsonb_build_object('online',heartbeat>now()-interval '90 seconds') FROM agents a ORDER BY room,id").fetch_all(&mut *tx).await?;
     let ranking:Vec<(Value,)>=sqlx::query_as("SELECT r.data||jsonb_build_object('score',r.score,'updated_at',r.updated_at,'price',q.price::text,'quote_time',q.observed_at) FROM rankings r LEFT JOIN quotes q USING(symbol) ORDER BY r.score DESC,symbol LIMIT 50").fetch_all(&mut *tx).await?;
-    let positions:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('symbol',p.symbol,'quantity',p.quantity::text,'cost',p.cost::text,'average_price',(p.cost/p.quantity)::text,'price',q.price::text,'value',(p.quantity*q.price)::text,'unrealized_pnl',(p.quantity*q.price-p.cost)::text,'opened_at',p.opened_at,'strategy',p.strategy,'stale',q.observed_at IS NULL OR q.observed_at<now()-interval '30 seconds') FROM positions p LEFT JOIN quotes q USING(symbol) ORDER BY p.symbol").fetch_all(&mut *tx).await?;
+    let fx: Option<(Decimal, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT price,observed_at FROM fx_quotes WHERE pair='USDTBRL'")
+            .fetch_optional(&mut *tx)
+            .await?;
+    let fx_rate = fx.as_ref().map(|v| v.0).unwrap_or(Decimal::ZERO);
+    let fx_stale = fx.as_ref().is_none_or(|v| {
+        (chrono::Utc::now() - v.1).num_seconds() > 60
+            || v.1 > chrono::Utc::now() + chrono::Duration::seconds(5)
+    });
+    let positions:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('symbol',p.symbol,'quantity',p.quantity::text,'cost',p.cost::text,'average_price',(p.cost/NULLIF(p.quantity*COALESCE(f.price,0),0))::text,'price',q.price::text,'quote_currency','USDT','value',(p.quantity*COALESCE(q.price*f.price,p.cost))::text,'currency','BRL','unrealized_pnl',(p.quantity*COALESCE(q.price*f.price,p.cost)-p.cost)::text,'opened_at',p.opened_at,'strategy',p.strategy,'stale',q.observed_at IS NULL OR q.observed_at<now()-interval '30 seconds' OR f.observed_at IS NULL OR f.observed_at<now()-interval '60 seconds') FROM positions p LEFT JOIN quotes q USING(symbol) LEFT JOIN fx_quotes f ON f.pair='USDTBRL' ORDER BY p.symbol").fetch_all(&mut *tx).await?;
     let wallet: Option<(Decimal, Decimal, Decimal, Decimal, Decimal, Value)> = sqlx::query_as(
         "SELECT initial_balance,cash,realized_pnl,fees,peak_equity,limits FROM wallet WHERE id=1",
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let (exposure,unrealized):(Decimal,Decimal)=sqlx::query_as("SELECT COALESCE(sum(COALESCE(p.quantity*q.price,p.cost)),0),COALESCE(sum(COALESCE(p.quantity*q.price,p.cost)-p.cost),0) FROM positions p LEFT JOIN quotes q USING(symbol)").fetch_one(&mut *tx).await?;
+    let (exposure,unrealized):(Decimal,Decimal)=sqlx::query_as("SELECT COALESCE(sum(COALESCE(p.quantity*q.price*f.price,p.cost)),0),COALESCE(sum(COALESCE(p.quantity*q.price*f.price,p.cost)-p.cost),0) FROM positions p LEFT JOIN quotes q USING(symbol) LEFT JOIN fx_quotes f ON f.pair='USDTBRL'").fetch_one(&mut *tx).await?;
     let (reserved,): (Decimal,) =
         sqlx::query_as("SELECT COALESCE(sum(reserved),0) FROM intents WHERE status='APPROVED'")
             .fetch_one(&mut *tx)
@@ -124,7 +145,11 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         sqlx::query_as("SELECT to_jsonb(c) FROM company_runtime c WHERE id=1")
             .fetch_one(&mut *tx)
             .await?;
-    let account=wallet.map(|(initial,cash,realized,fees,peak,limits)|json!({"initial_balance":initial,"currency":"USDT","cash":cash,"available":cash-reserved,"reserved":reserved,"equity":cash+exposure,"exposure":exposure,"unrealized_pnl":unrealized,"realized_pnl":realized,"fees":fees,"drawdown":if peak>d("0"){((peak-cash-exposure)/peak).max(d("0"))}else{d("0")},"limits":limits,"simulated":true}));
+    let (settings,): (Value,) =
+        sqlx::query_as("SELECT to_jsonb(s)-'id' FROM company_settings s WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    let account=wallet.map(|(initial,cash,realized,fees,peak,limits)|json!({"initial_balance":initial,"currency":"BRL","fx_rate":if fx_rate>Decimal::ZERO{Some(fx_rate)}else{None},"fx_source":"binance-public-ticker","fx_stale":fx_stale,"fx_observed_at":fx.as_ref().map(|v|v.1),"cash":cash,"available":cash-reserved,"reserved":reserved,"equity":cash+exposure,"exposure":exposure,"unrealized_pnl":unrealized,"realized_pnl":realized,"fees":fees,"drawdown":if peak>d("0"){((peak-cash-exposure)/peak).max(d("0"))}else{d("0")},"limits":limits,"simulated":true}));
     let decisions: Vec<(Value,)> = sqlx::query_as(
         "SELECT to_jsonb(d)||jsonb_build_object('detail',detail-'inputs') FROM (SELECT * FROM decisions ORDER BY created_at DESC LIMIT 80) d",
     )
@@ -150,7 +175,7 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         rows.into_iter().map(|r| r.0).collect()
     }
     Ok(
-        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"company":company,"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
+        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"company":company,"settings":settings,"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
     )
 }
 pub fn number(v: &Value) -> f64 {

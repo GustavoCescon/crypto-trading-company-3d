@@ -70,7 +70,7 @@ pub async fn reconcile(pool: &PgPool) -> Result<(), Error> {
         .await?;
     let (state,expired): (String,bool) = sqlx::query_as("SELECT state,requested_at<now()-interval '3 minutes' FROM company_runtime WHERE id=1 FOR UPDATE").fetch_one(&mut *tx).await?;
     if state == "STARTING" {
-        let (ready,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM wallet WHERE id=1 AND cash>=0) AND EXISTS(SELECT 1 FROM quotes WHERE observed_at BETWEEN now()-interval '30 seconds' AND now()+interval '5 seconds') AND (SELECT count(*) FROM agents WHERE id IN ('risk','execution','scanner') AND state<>'ERROR' AND heartbeat>now()-interval '90 seconds')=3").fetch_one(&mut *tx).await?;
+        let (ready,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM wallet WHERE id=1 AND cash>=0) AND EXISTS(SELECT 1 FROM quotes WHERE observed_at BETWEEN now()-interval '30 seconds' AND now()+interval '5 seconds') AND EXISTS(SELECT 1 FROM fx_quotes WHERE pair='USDTBRL' AND observed_at BETWEEN now()-interval '60 seconds' AND now()+interval '5 seconds') AND (SELECT count(*) FROM agents WHERE id IN ('risk','execution','scanner') AND state<>'ERROR' AND heartbeat>now()-interval '90 seconds')=3").fetch_one(&mut *tx).await?;
         if ready {
             transition(
                 &mut tx,

@@ -2,10 +2,9 @@
 
 Empresa virtual de trading de criptomoedas, exclusivamente com dinheiro fictício.
 
-**Entrega atual: 1 — fundação.** API Rust/Axum/Tokio, PostgreSQL/TimescaleDB,
-Redis Streams, auditoria, outbox, health checks, métricas e testes. Ainda não há
-coleta de preços, estratégias, execução, agentes de notícias ou interface 3D.
-Nenhum retorno financeiro é calculado ou prometido nesta entrega.
+**Estado atual: implementação parcial do master prompt.** Há coleta pública Binance, sinais determinísticos, risco, execução fictícia, notícias, backtests e escritório Vue/TresJS. O controle de ligar/desligar é persistido e independente do navegador.
+
+**O MVP solicitado ainda não está completo.** Nesta configuração, o ledger contábil é BRL com R$ 1.000 de capital fictício; a cotação pública USDT/BRL é exigida para iniciar e dimensionar ordens. Trading real permanece bloqueado. Diretor autônomo, organização operacional dinâmica e interações de lazer seguem pendentes. Consulte [tarefas](docs/tasks/README.md) e [progresso, evidências e retomada](docs/progress.md).
 
 ## Executar
 
@@ -80,7 +79,6 @@ docs/                 arquitetura, decisões, roteiro e descrição de PR
 .github/workflows/    validação em CI
 ```
 
-O roadmap define quando criar os demais serviços e pacotes, evitando diretórios
-vazios e implementações fictícias. Leia [arquitetura](docs/architecture.md),
+A documentação de fundação abaixo registra decisões anteriores. Para o estado atual, use o relatório de progresso e os checklists do master prompt. Leia [arquitetura](docs/architecture.md),
 [decisões](docs/decisions/0001-foundation.md),
 [entregas](docs/roadmap.md) e [validação](docs/validation.md).

@@ -24,15 +24,15 @@ pub struct RiskLimits {
 impl Default for RiskLimits {
     fn default() -> Self {
         Self {
-            initial_balance: d("10000"),
-            order_budget: d("500"),
+            initial_balance: d("1000"),
+            order_budget: d("300"),
             max_asset_fraction: d("0.15"),
-            max_total_fraction: d("0.6"),
+            max_total_fraction: d("0.3"),
             daily_loss_fraction: d("0.03"),
             max_drawdown_fraction: d("0.1"),
             stop_loss_fraction: d("0.025"),
             take_profit_fraction: d("0.04"),
-            max_positions: 6,
+            max_positions: 5,
             max_signal_age_seconds: 120,
             fee_bps: d("10"),
             spread_bps: d("2"),
