@@ -1,0 +1,31 @@
+{
+  "name": "ctc-office",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "generate:models": "node scripts/generate-trader-model.mjs",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tresjs/cientos": "5.9.3",
+    "@tresjs/core": "5.9.3",
+    "lucide-vue-next": "^0.468.0",
+    "pinia": "^3.0.3",
+    "three": "^0.180.0",
+    "vue": "3.5.44"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^24.7.0",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^5.0.5",
+    "vue-tsc": "^3.0.8"
+  }
+}

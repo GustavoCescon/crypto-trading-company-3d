@@ -27,7 +27,7 @@ impl PublicClient {
         }
         Ok(Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(45))
                 .build()?,
             base,
         })
@@ -97,7 +97,9 @@ pub fn eligible(s: &Value) -> bool {
         && !base.ends_with("BEAR")
 }
 async fn exchange_info(pool: &PgPool, client: &PublicClient) -> Result<(), Error> {
-    let info = client.get("/api/v3/exchangeInfo").await?;
+    let info = client
+        .get("/api/v3/exchangeInfo?permissions=SPOT&showPermissionSets=false")
+        .await?;
     let symbols = info["symbols"]
         .as_array()
         .ok_or("missing exchange symbols")?;
@@ -191,6 +193,13 @@ async fn history(pool: &PgPool, client: &PublicClient, symbol: &str) -> Result<(
     Ok(())
 }
 async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
+    let (running,): (bool,) =
+        sqlx::query_as("SELECT state='RUNNING' FROM company_runtime WHERE id=1")
+            .fetch_one(pool)
+            .await?;
+    if !running {
+        return Ok(());
+    }
     let candles = db::candles(pool, symbol, 240).await?;
     let Some(last) = candles.last() else {
         return Ok(());
@@ -235,6 +244,17 @@ async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
     .await?;
     let id = uuid::Uuid::new_v4();
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT id FROM wallet WHERE id=1 FOR UPDATE")
+        .execute(&mut *tx)
+        .await?;
+    let (running,): (bool,) =
+        sqlx::query_as("SELECT state='RUNNING' FROM company_runtime WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    if !running {
+        tx.commit().await?;
+        return Ok(());
+    }
     let result=sqlx::query("INSERT INTO decisions(id,symbol,candle_time,action,score,rules_version,detail) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
         .bind(id).bind(symbol).bind(time).bind(&decision.action).bind(decision.score).bind(RULES).bind(json!({"analysis":decision,"inputs":candles})).execute(&mut *tx).await?;
     if result.rows_affected() > 0 {
@@ -294,6 +314,44 @@ async fn scan(
             .total_cmp(&db::number(&a["score"]))
             .then(a["symbol"].as_str().cmp(&b["symbol"].as_str()))
     });
+    // The scanner's seven independent market factors are first-class backend
+    // specialists. Each reports the real candidate/value it ranked this cycle;
+    // these records drive the office floor and do not alter trading signals.
+    let specialists = [
+        ("analyst_volume", "Victor", "Volume", "volume"),
+        ("analyst_liquidity", "Luna", "Liquidez", "liquidity"),
+        (
+            "analyst_volatility",
+            "Valentina",
+            "Volatilidade",
+            "volatility",
+        ),
+        ("analyst_spread", "Samuel", "Spread", "spread_bps"),
+        ("analyst_momentum", "Marcelo", "Momentum", "change"),
+        ("analyst_trend", "Tainá", "Tendência", "change"),
+        ("analyst_selection", "Davi", "Seleção de pares", "score"),
+    ];
+    for (id, name, label, field) in specialists {
+        let candidate = if field == "spread_bps" {
+            ranking
+                .iter()
+                .min_by(|a, b| db::number(&a[field]).total_cmp(&db::number(&b[field])))
+        } else {
+            ranking
+                .iter()
+                .max_by(|a, b| db::number(&a[field]).total_cmp(&db::number(&b[field])))
+        };
+        db::agent(
+            pool,
+            id,
+            name,
+            &format!("Especialista em {label}"),
+            "market",
+            "ANALYZING",
+            json!({"factor":label,"candidate":candidate.map(|r|r["symbol"].as_str().unwrap_or("")),"value":candidate.map(|r|db::number(&r[field])).unwrap_or(0.0),"ranked_pairs":ranking.len()}),
+        )
+        .await?;
+    }
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM rankings")
         .execute(&mut *tx)
@@ -339,6 +397,13 @@ async fn scan(
         }
     }
     for id in [
+        "analyst_volume",
+        "analyst_liquidity",
+        "analyst_volatility",
+        "analyst_spread",
+        "analyst_momentum",
+        "analyst_trend",
+        "analyst_selection",
         "moving_average",
         "rsi",
         "macd",

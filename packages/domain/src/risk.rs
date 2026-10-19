@@ -86,6 +86,9 @@ pub fn veto(
     age: i64,
     quote_age: i64,
 ) -> Result<(), String> {
+    if budget <= Decimal::ZERO || e.cash < Decimal::ZERO || e.reserved < Decimal::ZERO {
+        return Err("Orçamento ou saldo inválido".into());
+    }
     if !(0..=l.max_signal_age_seconds).contains(&age) || !(0..=30).contains(&quote_age) {
         return Err("Sinal ou cotação fora da validade".into());
     }
@@ -117,7 +120,11 @@ pub fn fill_price(mid: Decimal, buy: bool, l: &RiskLimits) -> Decimal {
     mid * (Decimal::ONE + if buy { adjustment } else { -adjustment })
 }
 pub fn quantity(budget: Decimal, price: Decimal, step: Decimal, fee_bps: Decimal) -> Decimal {
-    if price <= Decimal::ZERO || step <= Decimal::ZERO {
+    if budget <= Decimal::ZERO
+        || price <= Decimal::ZERO
+        || step <= Decimal::ZERO
+        || fee_bps < Decimal::ZERO
+    {
         return Decimal::ZERO;
     }
     ((budget / (price * (Decimal::ONE + fee_bps / d("10000")))) / step).floor() * step
@@ -125,6 +132,17 @@ pub fn quantity(budget: Decimal, price: Decimal, step: Decimal, fee_bps: Decimal
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_budget_never_creates_negative_quantity() {
+        assert_eq!(
+            quantity(d("-10"), d("100"), d("0.01"), d("10")),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            quantity(d("10"), d("100"), d("0.01"), d("-10000")),
+            Decimal::ZERO
+        );
+    }
     #[test]
     fn precision_and_costs() {
         let l = RiskLimits::default();

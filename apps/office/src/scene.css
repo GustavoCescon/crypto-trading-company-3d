@@ -1,0 +1,23 @@
+.office-panel{background:#10191f;border-color:#24383b;box-shadow:0 18px 42px #121d2522}
+.office-panel>.panel-title{background:#142229ef;color:#dce7df;border-color:#314044}
+.office-panel .muted,.office-panel .small-tag{color:#99ada6}
+.office-canvas{height:min(72vh,760px);min-height:620px;background:radial-gradient(ellipse at 48% 42%,#26383b 0,#18272d 62%,#11191e 100%);isolation:isolate}
+.office-webgl,.office-webgl canvas{position:absolute!important;inset:0;width:100%!important;height:100%!important;display:block}
+.office-fallback{position:absolute;inset:0;display:grid;place-items:center;background:#151f25;color:#e2ebe5;padding:28px;text-align:center}
+.scene-tools{position:absolute;top:58px;right:16px;z-index:4;display:flex;align-items:center;gap:7px;padding:6px;background:#102126f2;border:1px solid #728477;border-radius:8px;box-shadow:0 8px 24px #08101488;backdrop-filter:blur(9px)}
+.scene-tools button,.scene-tools label{height:32px;display:flex;align-items:center;gap:7px;padding:0 10px;border-radius:5px;color:#d7e6dc;font-size:10px;white-space:nowrap}
+.scene-tools button:hover,.scene-tools label:hover{background:#344940;color:#f4f8e9}
+.scene-tools label{border-left:1px solid #53625a;border-radius:0;padding-left:12px}
+.scene-tools select{min-width:0;border:0;background:transparent;color:#dce9df;padding:4px 2px;font-size:10px;outline:none}
+.scene-tools select option{background:#1b2b30;color:#fff}
+.scene-tools .quality-state{padding:0 7px;color:#9fba9b;font-size:9px}
+.scene-hud{color:#c5d5ca;z-index:3;text-shadow:0 1px 4px #081014}
+.scene-label{color:#c6edaa;z-index:3;text-shadow:0 1px 5px #081014}
+.scene-label span{color:#b8c9bf;border-color:#748b7f}
+.team-detail h2{font-size:20px;letter-spacing:-.5px;margin:20px 19px 8px}
+.team-pnl{font-size:21px;font-weight:700;font-variant-numeric:tabular-nums;padding:0 19px 17px;border-bottom:1px solid #eef1e8}
+.team-pnl small{display:block;font-size:9px;font-weight:400;color:#8c978e;margin-top:5px}
+.team-detail .agent-list{max-height:430px}
+.team-detail .agent-list .mini-avatar.market{background:#dceee6;color:#40775f}
+@media(max-width:850px){.office-canvas{height:58vh;min-height:430px}.scene-tools{top:50px;right:9px;gap:2px;padding:4px}.scene-tools button,.scene-tools label{padding:0 7px;font-size:9px}.scene-tools .quality-state{display:none}.scene-hud{max-width:90%;bottom:12px}.team-detail .agent-list{max-height:300px}}
+@media(max-width:560px){.office-canvas{height:54vh;min-height:370px}.scene-tools button,.scene-tools label{gap:4px;padding:0 5px}.scene-tools button{font-size:8px}.scene-tools label{font-size:8px}}

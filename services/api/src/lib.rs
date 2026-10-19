@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use tower_http::trace::TraceLayer;
+mod projection;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -67,20 +68,33 @@ pub fn router(state: AppState) -> Router {
             get(|| async { Json(json!({"status": "ok"})) }),
         )
         .route("/health/ready", get(ready))
-        .route(
-            "/api/v1/system",
-            get(|| async {
-                Json(json!({
-                    "name": "Crypto Trading Company 3D", "version": env!("CARGO_PKG_VERSION"),
-                    "schema_version": 1, "trading_mode": "simulated", "execution_enabled": false,
-                    "implemented_stage": 1
-                }))
-            }),
-        )
+        .route("/api/v1/system", get(system))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/snapshot", get(projection::snapshot))
+        .route("/api/v1/company/start", axum::routing::post(start_company))
+        .route("/api/v1/company/stop", axum::routing::post(stop_company))
+        .route("/api/v1/ws", get(projection::websocket))
+        .route(
+            "/api/v1/backtests",
+            axum::routing::post(projection::backtest),
+        )
+        .route("/api/v1/decisions/{id}", get(projection::decision))
         .route("/metrics", get(metrics))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn system(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+    let (operating,): (String,) = sqlx::query_as("SELECT state FROM company_runtime WHERE id=1")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(Json(json!({
+        "name":"Crypto Trading Company 3D", "version":env!("CARGO_PKG_VERSION"),
+        "schema_version":1, "trading_mode":"simulated", "execution_enabled":false,
+        "company_state":operating, "paper_execution_enabled":operating=="RUNNING",
+        "mvp_complete":false
+    })))
 }
 
 async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
@@ -111,6 +125,23 @@ async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
         status,
         Json(json!({"ready": database && redis, "database": database, "redis": redis})),
     )
+}
+
+async fn start_company(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+    if ready(State(state.clone())).await.0 != StatusCode::OK {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    ctc_engine::company::request(&state.pool, true)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+}
+
+async fn stop_company(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+    ctc_engine::company::request(&state.pool, false)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
 
 async fn events(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {

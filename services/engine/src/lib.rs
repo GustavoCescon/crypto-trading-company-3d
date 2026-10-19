@@ -1,3 +1,4 @@
+pub mod company;
 pub mod db;
 pub mod market;
 pub mod trading;

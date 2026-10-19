@@ -156,6 +156,15 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
     let id: Uuid = row.get("id");
     let symbol: String = row.get("symbol");
     let side: String = row.get("side");
+    let (running,): (bool,) =
+        sqlx::query_as("SELECT state='RUNNING' FROM company_runtime WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    if side == "BUY" && !running {
+        reject(&mut tx, id, &symbol, "Empresa não está em operação").await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
     let created: DateTime<Utc> = row.get("created_at");
     let q=sqlx::query("SELECT q.*,s.filters,s.eligible,s.updated_at AS filters_updated FROM quotes q JOIN market_symbols s USING(symbol) WHERE symbol=$1").bind(&symbol).fetch_optional(&mut *tx).await?;
     let Some(q) = q else {
@@ -226,7 +235,8 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
             json!({"symbol":symbol,"state":"BLOCKED","reason":reason})
         }
         Ok(()) => {
-            let snapshot = json!({"limits":l,"price":price,"quote_time":observed,"equity":e.equity,"cash":e.cash,"reserved_before":e.reserved,"filters":filters,"rules_version":"risk-1.0.0"});
+            let explanation = format!("Orçamento máximo de {} USDT; quantidade {} após arredondamento ao lote. Inclui taxa de {} pontos-base e reserva adicional de 1%. A aprovação respeita saldo, exposição e perdas. Valores legados em USDT, sem conversão para reais.", l.order_budget, qty, l.fee_bps);
+            let snapshot = json!({"limits":l,"price":price,"quote_time":observed,"equity":e.equity,"cash":e.cash,"reserved_before":e.reserved,"filters":filters,"rules_version":"risk-1.0.0","sizing_explanation":explanation,"currency":"USDT"});
             sqlx::query("UPDATE intents SET status='APPROVED',quantity=$2,reserved=$3,approved_at=now(),risk_reason='Limites e filtros aprovados',risk_snapshot=$4 WHERE id=$1")
                 .bind(id).bind(qty).bind(reserve).bind(snapshot).execute(&mut *tx).await?;
             db::activity(&mut tx,"risk","risk_approved",json!({"intent_id":id,"symbol":symbol,"side":side,"quantity":qty,"reserved":reserve})).await?;
@@ -249,6 +259,21 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
     let id: Uuid = row.get("id");
     let symbol: String = row.get("symbol");
     let side: String = row.get("side");
+    let (running,): (bool,) =
+        sqlx::query_as("SELECT state='RUNNING' FROM company_runtime WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    if side == "BUY" && !running {
+        reject(
+            &mut tx,
+            id,
+            &symbol,
+            "Entrada cancelada durante encerramento",
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
     let qty: Decimal = row.get("quantity");
     let expires: DateTime<Utc> = row.get("expires_at");
     let snap: Value = row.get("risk_snapshot");
@@ -257,7 +282,10 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
     let reference = db::decimal(&snap["price"])?;
     if expires <= Utc::now()
         || price.is_none()
-        || observed.is_none_or(|t| Utc::now().signed_duration_since(t).num_seconds() > 30)
+        || observed.is_none_or(|t| {
+            Utc::now().signed_duration_since(t).num_seconds() > 30
+                || t > Utc::now() + chrono::Duration::seconds(5)
+        })
         || price.is_some_and(|p| (p / reference - d("1")).abs() > d("0.01"))
         || snap["limits"] != serde_json::to_value(l)?
     {
@@ -354,12 +382,18 @@ pub async fn execution_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Valu
 async fn monitor(pool: &PgPool, l: &RiskLimits) -> Result<(), Error> {
     let mut tx = pool.begin().await?;
     let e = exposure(&mut tx, "", Uuid::nil()).await?;
+    let (stopping,): (bool,) =
+        sqlx::query_as("SELECT state='STOPPING' FROM company_runtime WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query("INSERT INTO equity_history(observed_at,equity,cash,exposure) VALUES(now(),$1,$2,$3) ON CONFLICT DO NOTHING").bind(e.equity).bind(e.cash).bind(e.total).execute(&mut *tx).await?;
     let rows:Vec<(String,Decimal,Decimal,Decimal)>=sqlx::query_as("SELECT p.symbol,p.quantity,p.cost,q.price FROM positions p JOIN quotes q USING(symbol) WHERE q.observed_at>now()-interval '30 seconds'").fetch_all(&mut *tx).await?;
     for (symbol, qty, cost, price) in rows {
         let change = qty * price / cost - d("1");
-        if change <= -l.stop_loss_fraction || change >= l.take_profit_fraction {
-            let reason = if change < d("0") {
+        if stopping || change <= -l.stop_loss_fraction || change >= l.take_profit_fraction {
+            let reason = if stopping {
+                "Fechamento simulado solicitado pelo proprietário"
+            } else if change < d("0") {
                 "Stop-loss"
             } else {
                 "Take-profit"
@@ -385,6 +419,7 @@ pub async fn risk_loop(pool: PgPool, l: RiskLimits) -> Result<(), Error> {
     let mut counter = 0;
     loop {
         let result = async {
+            crate::company::reconcile(&pool).await?;
             if counter % 5 == 0 {
                 monitor(&pool, &l).await?;
             }

@@ -1,5 +1,73 @@
 name: crypto-trading-company-3d
+x-worker: &worker
+  image: crypto-trading-company-3d-api:latest
+  build:
+    context: .
+    target: runtime
+  command: [ctc-worker]
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  depends_on:
+    api:
+      condition: service_healthy
+x-worker-env: &worker-env
+  DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+  TRADING_MODE: simulated
+  INITIAL_BALANCE: ${INITIAL_BALANCE:-10000}
+  ORDER_BUDGET: ${ORDER_BUDGET:-500}
+  MAX_ASSET_EXPOSURE: ${MAX_ASSET_EXPOSURE:-0.15}
+  MAX_TOTAL_EXPOSURE: ${MAX_TOTAL_EXPOSURE:-0.6}
+  DAILY_LOSS_LIMIT: ${DAILY_LOSS_LIMIT:-0.03}
+  MAX_DRAWDOWN: ${MAX_DRAWDOWN:-0.1}
+  STOP_LOSS: ${STOP_LOSS:-0.025}
+  TAKE_PROFIT: ${TAKE_PROFIT:-0.04}
+  MAX_POSITIONS: ${MAX_POSITIONS:-6}
+  FEE_BPS: ${FEE_BPS:-10}
+  SPREAD_BPS: ${SPREAD_BPS:-2}
+  SLIPPAGE_BPS: ${SLIPPAGE_BPS:-3}
 services:
+  market:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: market
+      SCANNER_TOP_N: ${SCANNER_TOP_N:-8}
+      BINANCE_REST_URL: ${BINANCE_REST_URL:-https://data-api.binance.vision}
+      BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://data-stream.binance.vision}
+  risk:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: risk
+  execution:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: execution
+  news:
+    build: ./services/news
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+      NEWS_FEEDS: ${NEWS_FEEDS:-https://www.coindesk.com/arc/outboundfeeds/rss/}
+      NEWS_ALLOWED_HOSTS: ${NEWS_ALLOWED_HOSTS:-www.coindesk.com,cointelegraph.com}
+      NEWS_INTERVAL: ${NEWS_INTERVAL:-300}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4.1-mini}
+    depends_on:
+      api:
+        condition: service_healthy
+  frontend:
+    build: ./apps/office
+    ports:
+      - 127.0.0.1:5173:80
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
   postgres:
     image: timescale/timescaledb:2.22.0-pg17
     environment:

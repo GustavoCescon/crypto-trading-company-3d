@@ -115,8 +115,16 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let (exposure,unrealized):(Decimal,Decimal)=sqlx::query_as("SELECT COALESCE(sum(p.quantity*q.price),0),COALESCE(sum(p.quantity*q.price-p.cost),0) FROM positions p LEFT JOIN quotes q USING(symbol)").fetch_one(&mut *tx).await?;
-    let account=wallet.map(|(initial,cash,realized,fees,peak,limits)|json!({"initial_balance":initial,"cash":cash,"equity":cash+exposure,"exposure":exposure,"unrealized_pnl":unrealized,"realized_pnl":realized,"fees":fees,"drawdown":if peak>d("0"){((peak-cash-exposure)/peak).max(d("0"))}else{d("0")},"limits":limits,"simulated":true}));
+    let (exposure,unrealized):(Decimal,Decimal)=sqlx::query_as("SELECT COALESCE(sum(COALESCE(p.quantity*q.price,p.cost)),0),COALESCE(sum(COALESCE(p.quantity*q.price,p.cost)-p.cost),0) FROM positions p LEFT JOIN quotes q USING(symbol)").fetch_one(&mut *tx).await?;
+    let (reserved,): (Decimal,) =
+        sqlx::query_as("SELECT COALESCE(sum(reserved),0) FROM intents WHERE status='APPROVED'")
+            .fetch_one(&mut *tx)
+            .await?;
+    let (company,): (Value,) =
+        sqlx::query_as("SELECT to_jsonb(c) FROM company_runtime c WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    let account=wallet.map(|(initial,cash,realized,fees,peak,limits)|json!({"initial_balance":initial,"currency":"USDT","cash":cash,"available":cash-reserved,"reserved":reserved,"equity":cash+exposure,"exposure":exposure,"unrealized_pnl":unrealized,"realized_pnl":realized,"fees":fees,"drawdown":if peak>d("0"){((peak-cash-exposure)/peak).max(d("0"))}else{d("0")},"limits":limits,"simulated":true}));
     let decisions: Vec<(Value,)> = sqlx::query_as(
         "SELECT to_jsonb(d)||jsonb_build_object('detail',detail-'inputs') FROM (SELECT * FROM decisions ORDER BY created_at DESC LIMIT 80) d",
     )
@@ -142,7 +150,7 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         rows.into_iter().map(|r| r.0).collect()
     }
     Ok(
-        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
+        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"company":company,"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
     )
 }
 pub fn number(v: &Value) -> f64 {
