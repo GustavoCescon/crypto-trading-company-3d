@@ -1,6 +1,6 @@
 use crate::{db, Error};
 use chrono::{DateTime, Utc};
-use ctc_domain::strategies::{analyze, RULES};
+use ctc_domain::strategies::{analyze, committee_with_weights, Decision, Signal, RULES};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -205,7 +205,81 @@ async fn history(pool: &PgPool, client: &PublicClient, symbol: &str) -> Result<(
     }
     Ok(())
 }
-async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
+async fn ollama_committee(
+    pool: &PgPool,
+    client: &reqwest::Client,
+    symbol: &str,
+    mut signals: Vec<Signal>,
+) -> Result<(Decision, Vec<(String, f64, String)>), Error> {
+    let endpoint = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://ollama:11434".into());
+    let (model,): (String,) = sqlx::query_as("SELECT model FROM ai_runtime_state WHERE id=1")
+        .fetch_one(pool).await?;
+    let schema = json!({"type":"object","properties":{"votes":{"type":"array","items":{"type":"object","properties":{
+        "strategy":{"type":"string","enum":["moving_average","rsi","macd","bollinger","momentum","breakout"]},
+        "score":{"type":"number","minimum":-1,"maximum":1},"reason":{"type":"string","maxLength":160}},
+        "required":["strategy","score","reason"],"additionalProperties":false},"minItems":6,"maxItems":6},
+        "market_agents":{"type":"array","items":{"type":"object","properties":{
+        "agent_id":{"type":"string","enum":["analyst_volume","analyst_liquidity","analyst_volatility","analyst_spread","analyst_momentum","analyst_trend","analyst_selection"]},
+        "score":{"type":"number","minimum":-1,"maximum":1},"opinion":{"type":"string","maxLength":120}},
+        "required":["agent_id","score","opinion"],"additionalProperties":false},"minItems":7,"maxItems":7}},
+        "required":["votes","market_agents"],"additionalProperties":false});
+    let (market_data,): (Value,) = sqlx::query_as("SELECT data FROM rankings WHERE symbol=$1")
+        .bind(symbol).fetch_one(pool).await?;
+    let response = client.post(format!("{endpoint}/api/chat")).json(&json!({
+        "model":model,"stream":false,"format":schema,"options":{"temperature":0,"num_predict":500},
+        "messages":[
+            {"role":"system","content":"Voce coordena os seis agentes de estrategia e sete analistas de mercado. Cada agente avalia somente seu papel e deve retornar exatamente uma opiniao: seis votos de estrategia e sete market_agents. Scores vao de -1 (evitar/venda) a 1 (favoravel); use 0 se a evidência for insuficiente. Seja conservador e nao trate variacao isolada como sinal. Nunca emita ordens nem altere controles de risco."},
+            {"role":"user","content":json!({"symbol":symbol,"strategy_agents":signals,"market_agents":{"volume":"analyst_volume avalia volume","liquidity":"analyst_liquidity avalia liquidez","volatility":"analyst_volatility avalia volatilidade","spread":"analyst_spread avalia custo do spread","momentum":"analyst_momentum avalia variacao","trend":"analyst_trend avalia tendencia","selection":"analyst_selection decide se o ativo merece acompanhamento"},"market_data":market_data}).to_string()}
+        ]
+    })).timeout(Duration::from_secs(240)).send().await?.error_for_status()?.json::<Value>().await?;
+    let content = response["message"]["content"].as_str().ok_or("Ollama response missing content")?;
+    let parsed: Value = serde_json::from_str(content)?;
+    let votes = parsed["votes"].as_array().ok_or("Ollama council missing votes")?;
+    if votes.len() != 6 { return Err("Ollama council must return six specialist votes".into()); }
+    let mut seen = HashSet::new();
+    for vote in votes {
+        let name = vote["strategy"].as_str().ok_or("Invalid strategy vote")?;
+        let score = vote["score"].as_f64().ok_or("Invalid agent score")?;
+        let reason = vote["reason"].as_str().ok_or("Invalid agent rationale")?;
+        if !(-1.0..=1.0).contains(&score) || !seen.insert(name.to_owned()) {
+            return Err("Ollama returned an invalid or duplicate agent vote".into());
+        }
+        let signal = signals.iter_mut().find(|s| s.strategy == name).ok_or("Unknown strategy vote")?;
+        signal.score = score;
+        signal.reason = format!("{} | Ollama: {}", signal.reason, reason);
+    }
+    if seen.len() != 6 { return Err("Ollama council omitted a strategy specialist".into()); }
+    let mut market_seen = HashSet::new();
+    let mut market_votes = Vec::new();
+    let market_agents = parsed["market_agents"].as_array().ok_or("Ollama council missing market analysts")?;
+    if market_agents.len() != 7 { return Err("Ollama council must return seven market analysts".into()); }
+    for vote in market_agents {
+        let id = vote["agent_id"].as_str().ok_or("Invalid market analyst")?;
+        let score = vote["score"].as_f64().ok_or("Invalid market score")?;
+        let opinion = vote["opinion"].as_str().ok_or("Invalid market opinion")?;
+        let known_agent = matches!(id, "analyst_volume" | "analyst_liquidity" | "analyst_volatility"
+            | "analyst_spread" | "analyst_momentum" | "analyst_trend" | "analyst_selection");
+        if !known_agent || !(-1.0..=1.0).contains(&score) || !market_seen.insert(id.to_owned()) {
+            return Err("Ollama returned an invalid or duplicate market opinion".into());
+        }
+        market_votes.push((id.to_owned(), score, opinion.to_owned()));
+    }
+    if market_seen.len() != 7 { return Err("Ollama council omitted a market analyst".into()); }
+    let rows: Vec<(String, bool, f64)> = sqlx::query_as("SELECT strategy,enabled,weight::float8 FROM strategy_policies")
+        .fetch_all(pool).await?;
+    let weights = rows.into_iter().map(|(strategy, enabled, weight)|
+        (strategy, if enabled { weight } else { 0.0 })).collect();
+    let mut decision = committee_with_weights(signals, &weights);
+    decision.rules_version = format!("{}+ollama-council", decision.rules_version);
+    decision.reason = format!("Consenso dos agentes {:.4}; decisão assistida por Ollama ({model})", decision.score);
+    if decision.action == "BUY" && market_votes.iter().find(|v|v.0=="analyst_selection").is_some_and(|v|v.1 < 0.2) {
+        decision.action = "HOLD".into();
+        decision.reason.push_str("; bloqueada pelo analista Ollama de selecao de ativo");
+    }
+    Ok((decision, market_votes))
+}
+
+async fn analyze_asset(pool: &PgPool, symbol: &str, llm: &reqwest::Client) -> Result<(), Error> {
     let (running,): (bool,) =
         sqlx::query_as("SELECT state='RUNNING' FROM company_runtime WHERE id=1")
             .fetch_one(pool)
@@ -221,11 +295,42 @@ async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
     if Utc::now().timestamp_millis() - last.time > 180_000 {
         return Err("historical series not caught up".into());
     }
-    let (exists,):(bool,)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM decisions WHERE symbol=$1 AND candle_time=$2 AND rules_version=$3)").bind(symbol).bind(time).bind(RULES).fetch_one(pool).await?;
+    let council_rules = format!("{RULES}+ollama-council");
+    let (exists,):(bool,)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM decisions WHERE symbol=$1 AND candle_time=$2 AND rules_version IN ($3,$4))").bind(symbol).bind(time).bind(RULES).bind(council_rules).fetch_one(pool).await?;
     if exists {
         return Ok(());
     }
-    let decision = analyze(&candles);
+    let base = analyze(&candles);
+    let decision = if base.signals.is_empty() {
+        base
+    } else {
+        let (decision, market_votes) = match ollama_committee(pool, llm, symbol, base.signals.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                db::agent(pool, "committee", "Helena", "Presidente do comitê", "committee", "BLOCKED",
+                    json!({"symbol":symbol,"error":"Ollama indisponível ou resposta inválida; ordem bloqueada"})).await?;
+                for signal in &base.signals {
+                    db::agent(pool, &signal.strategy, &signal.strategy, &signal.strategy, "technical", "BLOCKED",
+                        json!({"symbol":symbol,"error":"Aguardando voto local válido do Ollama"})).await?;
+                }
+                return Err(error);
+            }
+        };
+        for (id, score, opinion) in market_votes {
+            let (name, role) = match id.as_str() {
+                "analyst_volume" => ("Victor", "Analista de Volume"),
+                "analyst_liquidity" => ("Luna", "Analista de Liquidez"),
+                "analyst_volatility" => ("Valentina", "Analista de Volatilidade"),
+                "analyst_spread" => ("Samuel", "Analista de Spread"),
+                "analyst_momentum" => ("Marcelo", "Analista de Momentum"),
+                "analyst_trend" => ("Tainá", "Analista de Tendência"),
+                _ => ("Davi", "Analista de Seleção"),
+            };
+            db::agent(pool, &id, name, role, "market", "ANALYZING",
+                json!({"symbol":symbol,"score":score,"opinion":opinion,"model":"ollama"})).await?;
+        }
+        decision
+    };
     for s in &decision.signals {
         db::agent(
             pool,
@@ -269,7 +374,7 @@ async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
         return Ok(());
     }
     let result=sqlx::query("INSERT INTO decisions(id,symbol,candle_time,action,score,rules_version,detail) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-        .bind(id).bind(symbol).bind(time).bind(&decision.action).bind(decision.score).bind(RULES).bind(json!({"analysis":decision,"inputs":candles})).execute(&mut *tx).await?;
+        .bind(id).bind(symbol).bind(time).bind(&decision.action).bind(decision.score).bind(&decision.rules_version).bind(json!({"analysis":decision,"inputs":candles})).execute(&mut *tx).await?;
     if result.rows_affected() > 0 {
         db::activity(&mut tx,"committee","decision",json!({"decision_id":id,"symbol":symbol,"action":decision.action,"score":decision.score,"reason":decision.reason})).await?;
         if decision.action != "HOLD" {
@@ -283,6 +388,7 @@ async fn analyze_asset(pool: &PgPool, symbol: &str) -> Result<(), Error> {
 async fn scan(
     pool: &PgPool,
     client: &PublicClient,
+    llm: &reqwest::Client,
     selected: &watch::Sender<Vec<String>>,
 ) -> Result<(), Error> {
     db::agent(
@@ -378,11 +484,9 @@ async fn scan(
             .await?;
     }
     tx.commit().await?;
-    let count = std::env::var("SCANNER_TOP_N")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(8)
-        .clamp(1, 32);
+    let (count,): (i32,) = sqlx::query_as("SELECT scanner_symbols FROM ai_runtime_state WHERE id=1")
+        .fetch_optional(pool).await?.unwrap_or((3,));
+    let count = (count as usize).clamp(1, 8);
     let mut symbols: Vec<String> = ranking
         .iter()
         .take(count)
@@ -401,7 +505,7 @@ async fn scan(
     }
     for symbol in &symbols {
         history(pool, client, symbol).await?;
-        analyze_asset(pool, symbol).await?;
+        analyze_asset(pool, symbol, llm).await?;
         let c = db::candles(pool, symbol, 60).await?;
         if c.len() >= 60 {
             let n = c.len();
@@ -507,6 +611,8 @@ async fn websocket(pool: PgPool, mut selected: watch::Receiver<Vec<String>>) {
 }
 pub async fn run(pool: PgPool) -> Result<(), Error> {
     let client = PublicClient::new()?;
+    let llm = reqwest::Client::builder().connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(240)).build()?;
     let fx_pool = pool.clone();
     let fx_client = client.clone();
     tokio::spawn(async move {
@@ -527,7 +633,7 @@ pub async fn run(pool: PgPool) -> Result<(), Error> {
                 exchange_info(&pool, &client).await?;
                 last_info = std::time::Instant::now();
             }
-            scan(&pool, &client, &sender).await
+            scan(&pool, &client, &llm, &sender).await
         }
         .await;
         if let Err(e) = result {

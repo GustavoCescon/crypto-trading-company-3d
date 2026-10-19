@@ -15,6 +15,7 @@ pub struct RiskLimits {
     pub max_drawdown_fraction: Decimal,
     pub stop_loss_fraction: Decimal,
     pub take_profit_fraction: Decimal,
+    pub take_profit_brl: Decimal,
     pub max_positions: usize,
     pub max_signal_age_seconds: i64,
     pub fee_bps: Decimal,
@@ -32,6 +33,7 @@ impl Default for RiskLimits {
             max_drawdown_fraction: d("0.1"),
             stop_loss_fraction: d("0.025"),
             take_profit_fraction: d("0.04"),
+            take_profit_brl: d("1"),
             max_positions: 5,
             max_signal_age_seconds: 120,
             fee_bps: d("10"),
@@ -60,6 +62,9 @@ impl RiskLimits {
             if v <= Decimal::ZERO || v > Decimal::ONE {
                 return Err("risk fractions must be in (0,1]".into());
             }
+        }
+        if self.take_profit_brl <= Decimal::ZERO {
+            return Err("take profit in BRL must be positive".into());
         }
         for v in [self.fee_bps, self.spread_bps, self.slippage_bps] {
             if v < Decimal::ZERO || v > d("100") {

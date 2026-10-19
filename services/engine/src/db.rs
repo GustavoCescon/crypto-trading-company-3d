@@ -75,6 +75,7 @@ pub fn limits_from_env() -> Result<RiskLimits, Error> {
     env_decimal!(max_drawdown_fraction, "MAX_DRAWDOWN");
     env_decimal!(stop_loss_fraction, "STOP_LOSS");
     env_decimal!(take_profit_fraction, "TAKE_PROFIT");
+    env_decimal!(take_profit_brl, "TAKE_PROFIT_BRL");
     env_decimal!(fee_bps, "FEE_BPS");
     env_decimal!(spread_bps, "SPREAD_BPS");
     env_decimal!(slippage_bps, "SLIPPAGE_BPS");
@@ -119,7 +120,7 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
     let (cursor,): (i64,) = sqlx::query_as("SELECT COALESCE(max(sequence),0) FROM audit_events")
         .fetch_one(&mut *tx)
         .await?;
-    let agents:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(a)||jsonb_build_object('online',heartbeat>now()-interval '90 seconds') FROM agents a ORDER BY room,id").fetch_all(&mut *tx).await?;
+    let agents:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(a)||jsonb_build_object('online',state<>'RETIRED' AND heartbeat>now()-interval '90 seconds') FROM agents a ORDER BY room,id").fetch_all(&mut *tx).await?;
     let ranking:Vec<(Value,)>=sqlx::query_as("SELECT r.data||jsonb_build_object('score',r.score,'updated_at',r.updated_at,'price',q.price::text,'quote_time',q.observed_at) FROM rankings r LEFT JOIN quotes q USING(symbol) ORDER BY r.score DESC,symbol LIMIT 50").fetch_all(&mut *tx).await?;
     let fx: Option<(Decimal, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as("SELECT price,observed_at FROM fx_quotes WHERE pair='USDTBRL'")
@@ -145,10 +146,6 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         sqlx::query_as("SELECT to_jsonb(c) FROM company_runtime c WHERE id=1")
             .fetch_one(&mut *tx)
             .await?;
-    let (settings,): (Value,) =
-        sqlx::query_as("SELECT to_jsonb(s)-'id' FROM company_settings s WHERE id=1")
-            .fetch_one(&mut *tx)
-            .await?;
     let account=wallet.map(|(initial,cash,realized,fees,peak,limits)|json!({"initial_balance":initial,"currency":"BRL","fx_rate":if fx_rate>Decimal::ZERO{Some(fx_rate)}else{None},"fx_source":"binance-public-ticker","fx_stale":fx_stale,"fx_observed_at":fx.as_ref().map(|v|v.1),"cash":cash,"available":cash-reserved,"reserved":reserved,"equity":cash+exposure,"exposure":exposure,"unrealized_pnl":unrealized,"realized_pnl":realized,"fees":fees,"drawdown":if peak>d("0"){((peak-cash-exposure)/peak).max(d("0"))}else{d("0")},"limits":limits,"simulated":true}));
     let decisions: Vec<(Value,)> = sqlx::query_as(
         "SELECT to_jsonb(d)||jsonb_build_object('detail',detail-'inputs') FROM (SELECT * FROM decisions ORDER BY created_at DESC LIMIT 80) d",
@@ -156,8 +153,13 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
     .fetch_all(&mut *tx)
     .await?;
     let orders:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(i)||jsonb_build_object('quantity',quantity::text,'reserved',reserved::text) FROM (SELECT * FROM intents ORDER BY created_at DESC LIMIT 80) i").fetch_all(&mut *tx).await?;
-    let fills:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(f)||jsonb_build_object('quantity',quantity::text,'price',price::text,'fee',fee::text,'realized_pnl',realized_pnl::text,'slippage_cost',slippage_cost::text) FROM (SELECT * FROM fills ORDER BY created_at DESC LIMIT 100) f").fetch_all(&mut *tx).await?;
+    let fills:Vec<(Value,)>=sqlx::query_as("SELECT to_jsonb(f)||jsonb_build_object('quantity',quantity::text,'price',price::text,'fee',fee::text,'realized_pnl',realized_pnl::text,'slippage_cost',slippage_cost::text,'total_brl',(quantity*price*fx_rate)::text) FROM (SELECT * FROM fills ORDER BY created_at DESC LIMIT 100) f").fetch_all(&mut *tx).await?;
     let teams:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('strategy',strategy,'trades',count(*),'closed',count(*) FILTER(WHERE side='SELL'),'wins',count(*) FILTER(WHERE side='SELL' AND realized_pnl>0),'realized_pnl',sum(realized_pnl)::text,'fees',sum(fee)::text) FROM fills GROUP BY strategy ORDER BY sum(realized_pnl) DESC").fetch_all(&mut *tx).await?;
+    let org_teams:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('id',t.id,'name',t.name,'department_id',t.department_id,'state',t.state,'created_at',t.created_at,'manager_agent_id',t.manager_agent_id,'manager_name',m.name,'agent_count',count(a.id) FILTER(WHERE a.state<>'RETIRED'),'performance_points',COALESCE(sum(a.performance_points) FILTER(WHERE a.state<>'RETIRED'),0)::text,'penalty_points',COALESCE(sum(a.penalty_points) FILTER(WHERE a.state<>'RETIRED'),0)::text) FROM company_teams t LEFT JOIN agents a ON a.team_id=t.id LEFT JOIN agents m ON m.id=t.manager_agent_id GROUP BY t.id,m.name ORDER BY t.state,t.name").fetch_all(&mut *tx).await?;
+    let latest_management:Option<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('id',id,'model',model,'summary',summary,'recommendations',recommendations,'applied',applied,'created_at',created_at) FROM management_reviews ORDER BY created_at DESC LIMIT 1").fetch_optional(&mut *tx).await?;
+    let ai_runtime:Option<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('model',model,'memory_mb',memory_mb,'cpu_cores',cpu_cores,'max_agents',max_agents,'review_minutes',review_minutes,'updated_at',updated_at) FROM ai_runtime_state WHERE id=1").fetch_optional(&mut *tx).await?;
+    let strategy_policies:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('strategy',strategy,'enabled',enabled,'weight',weight::text,'rationale',rationale,'updated_at',updated_at) FROM strategy_policies ORDER BY strategy").fetch_all(&mut *tx).await?;
+    let penalties:Vec<(Value,)>=sqlx::query_as("SELECT jsonb_build_object('agent_id',agent_id,'fill_id',fill_id,'points',points::text,'loss_brl',loss_brl::text,'reason',reason,'created_at',created_at) FROM management_penalties ORDER BY created_at DESC LIMIT 20").fetch_all(&mut *tx).await?;
     let news: Vec<(Value,)> = sqlx::query_as(
         "SELECT to_jsonb(n) FROM (SELECT * FROM news ORDER BY collected_at DESC LIMIT 30) n",
     )
@@ -175,7 +177,7 @@ pub async fn snapshot(pool: &PgPool) -> Result<Value, Error> {
         rows.into_iter().map(|r| r.0).collect()
     }
     Ok(
-        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"company":company,"settings":settings,"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
+        json!({"schema_version":1,"type":"snapshot","cursor":cursor,"server_time":chrono::Utc::now(),"company":company,"account":account,"agents":values(agents),"ranking":values(ranking),"positions":values(positions),"decisions":values(decisions),"orders":values(orders),"fills":values(fills),"teams":values(teams),"org_teams":values(org_teams),"management":{"latest_review":latest_management.map(|r|r.0),"runtime":ai_runtime.map(|r|r.0),"strategy_policies":values(strategy_policies),"penalties":values(penalties)},"news":values(news),"events":values(events),"equity_history":values(equity),"backtests":values(backtests),"simulation":true}),
     )
 }
 pub fn number(v: &Value) -> f64 {

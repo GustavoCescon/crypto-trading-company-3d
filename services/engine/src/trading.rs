@@ -219,10 +219,20 @@ pub async fn risk_once(pool: &PgPool, l: &RiskLimits) -> Result<Option<Value>, E
             .await?;
     let buy = side == "BUY";
     let fp = fill_price(price, buy, l);
+    // Reserve includes fees and a 1% safety buffer. Size the order against
+    // that full reserve so a max-sized order is not rejected by veto below.
+    let reserve_factor = (d("1") + l.fee_bps / d("10000")) * d("1.01");
+    let (managed_reserve, managed_budget): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT managed_cash_reserve_fraction,managed_order_budget_brl FROM company_settings WHERE id=1",
+    ).fetch_one(&mut *tx).await?;
+    let cash_deployable = (e.cash - e.reserved - e.equity * managed_reserve).max(d("0"));
     let allowed_brl = l
         .order_budget
-        .min((e.equity * l.max_asset_fraction - e.asset).max(d("0")))
-        .min((e.cash - e.reserved).max(d("0")));
+        .min(managed_budget)
+        .min(cash_deployable)
+        .min(((e.equity * l.max_asset_fraction - e.asset).max(d("0"))) / reserve_factor)
+        .min(((e.equity * l.max_total_fraction - e.total - e.reserved).max(d("0"))) / reserve_factor)
+        .min(((e.cash - e.reserved).max(d("0"))) / reserve_factor);
     let qty = if buy {
         quantity(allowed_brl, fp * fx_rate, lot_step(&filters)?, l.fee_bps)
     } else {
@@ -440,13 +450,18 @@ async fn monitor(pool: &PgPool, l: &RiskLimits) -> Result<(), Error> {
     let rows:Vec<(String,Decimal,Decimal,Decimal)>=sqlx::query_as("SELECT p.symbol,p.quantity,p.cost,q.price*f.price FROM positions p JOIN quotes q USING(symbol) JOIN fx_quotes f ON f.pair='USDTBRL' WHERE q.observed_at>now()-interval '30 seconds' AND f.observed_at>now()-interval '60 seconds'").fetch_all(&mut *tx).await?;
     for (symbol, qty, cost, price) in rows {
         let change = qty * price / cost - d("1");
-        if stopping || change <= -l.stop_loss_fraction || change >= l.take_profit_fraction {
+        // Estimate net proceeds after the sell-side spread/slippage and fee.
+        // `cost` already includes the buy-side fee in BRL.
+        let sell_cost_fraction = (l.spread_bps + l.slippage_bps) / d("10000");
+        let net_profit_brl = qty * price * (Decimal::ONE - sell_cost_fraction)
+            * (Decimal::ONE - l.fee_bps / d("10000")) - cost;
+        if stopping || change <= -l.stop_loss_fraction || net_profit_brl >= l.take_profit_brl {
             let reason = if stopping {
                 "Fechamento simulado solicitado pelo proprietário"
             } else if change < d("0") {
                 "Stop-loss"
             } else {
-                "Take-profit"
+                "Take-profit líquido em BRL"
             };
             let id = Uuid::new_v4();
             let result=sqlx::query("INSERT INTO intents(id,symbol,side,reason,expires_at) VALUES($1,$2,'SELL',$3,now()+interval '120 seconds') ON CONFLICT DO NOTHING")

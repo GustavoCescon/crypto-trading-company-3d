@@ -1,40 +1,43 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { onBeforeUnmount, shallowRef, watch } from 'vue'
-import { BoxGeometry, CanvasTexture, Color, CylinderGeometry, Group, InstancedMesh, Matrix4, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector3 } from 'three'
-type Desk={x:number;z:number;rotation?:number}
-const props=defineProps<{desks:Desk[];plants:Desk[]}>()
-const kit=shallowRef(new Group())
-const reusable:InstancedMesh[]=[]
+import { BoxGeometry, CanvasTexture, CylinderGeometry, Group, InstancedMesh, MeshStandardMaterial, Object3D, PlaneGeometry, SphereGeometry, SRGBColorSpace } from 'three'
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
+type Point={x:number;z:number;rotation?:number}
+const props=defineProps<{desks:Point[];plants:Point[]}>()
+const kit=shallowRef(new Group()),meshes:InstancedMesh[]=[]
 const helper=new Object3D()
-function addInstances(geometry:any,material:any,transforms:Array<{p:[number,number,number];s:[number,number,number];r?:number}>,group:Group){
-  if(!transforms.length)return
-  const mesh=new InstancedMesh(geometry,material,transforms.length);mesh.frustumCulled=false
-  transforms.forEach((t,index)=>{helper.position.set(...t.p);helper.rotation.set(0,t.r??0,0);helper.scale.set(...t.s);helper.updateMatrix();mesh.setMatrixAt(index,helper.matrix)})
-  mesh.instanceMatrix.needsUpdate=true;mesh.computeBoundingSphere();group.add(mesh);reusable.push(mesh)
-}
-const graphCanvas=document.createElement('canvas');graphCanvas.width=256;graphCanvas.height=128
-const g=graphCanvas.getContext('2d')!;g.fillStyle='#071d24';g.fillRect(0,0,256,128);g.strokeStyle='#173b3c';g.lineWidth=1
-for(let x=32;x<256;x+=32){g.beginPath();g.moveTo(x,0);g.lineTo(x,128);g.stroke()}for(let y=24;y<128;y+=24){g.beginPath();g.moveTo(0,y);g.lineTo(256,y);g.stroke()}
-g.strokeStyle='#66d39b';g.lineWidth=3;g.beginPath();[[0,94],[25,81],[48,90],[72,57],[96,70],[118,39],[143,59],[166,43],[189,48],[211,21],[234,33],[256,14]].forEach(([x,y],i)=>i?g.lineTo(x,y):g.moveTo(x,y));g.stroke()
-const graph=new CanvasTexture(graphCanvas);graph.colorSpace=SRGBColorSpace
-const materials={wood:new MeshStandardMaterial({color:'#e4e0d2',roughness:.83}),edge:new MeshStandardMaterial({color:'#f5f2e8',roughness:.7}),metal:new MeshStandardMaterial({color:'#596873',metalness:.55,roughness:.42}),screen:new MeshStandardMaterial({color:'#b9d4cf',roughness:.55,metalness:.2}),pixels:new MeshStandardMaterial({map:graph,emissive:'#315a4d',emissiveMap:graph,emissiveIntensity:.22}),chair:new MeshStandardMaterial({color:'#263743',roughness:.7}),pot:new MeshStandardMaterial({color:'#b58d6d',roughness:.9}),leaf:new MeshStandardMaterial({color:'#658b65',roughness:.8})}
-function rebuild(){
-  for(const mesh of reusable){mesh.geometry.dispose();mesh.material instanceof Array?mesh.material.forEach(m=>m.dispose()):mesh.material.dispose()}reusable.length=0;kit.value.clear()
-  const d=props.desks,deskTop=new BoxGeometry(3.05,.16,1.32),leg=new BoxGeometry(.1,.78,.1),frame=new BoxGeometry(1.34,.88,.11),plane=new PlaneGeometry(1.17,.67),keyboard=new BoxGeometry(.62,.035,.22),seat=new BoxGeometry(.72,.14,.66),back=new BoxGeometry(.68,.92,.13),post=new CylinderGeometry(.055,.08,.4,8),base=new BoxGeometry(.78,.08,.78)
-  addInstances(deskTop,materials.wood,d.map(v=>({p:[v.x,.82,v.z],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(leg,materials.metal,d.flatMap(v=>[-1,1].flatMap(x=>[-1,1].map(z=>({p:[v.x+x*1.36,.4,v.z+z*.53] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.rotation})))),kit.value)
-  addInstances(frame,materials.metal,d.map(v=>({p:[v.x,1.38,v.z-.43],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(plane,materials.pixels,d.map(v=>({p:[v.x,1.39,v.z-.495],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(keyboard,materials.screen,d.map(v=>({p:[v.x,.93,v.z+.29],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(seat,materials.chair,d.map(v=>({p:[v.x,.47,v.z+1.15],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(back,materials.chair,d.map(v=>({p:[v.x,.91,v.z+1.44],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(post,materials.metal,d.map(v=>({p:[v.x,.22,v.z+1.15],s:[1,1,1],r:v.rotation})),kit.value)
-  addInstances(base,materials.metal,d.map(v=>({p:[v.x,.055,v.z+1.15],s:[1,1,1],r:v.rotation})),kit.value)
-  const p=props.plants
-  addInstances(new CylinderGeometry(.2,.25,.34,8),materials.pot,p.map(v=>({p:[v.x,.22,v.z],s:[1,1,1]})),kit.value)
-  addInstances(new CylinderGeometry(.025,.23,.78,5),materials.leaf,p.map(v=>({p:[v.x,.73,v.z],s:[1,1,1],r:v.rotation})),kit.value)
+function instances(geometry:any,material:any,items:Array<{p:[number,number,number];s:[number,number,number];r?:number}>) {if(!items.length)return;const mesh=new InstancedMesh(geometry,material,items.length);mesh.frustumCulled=false;items.forEach((item,i)=>{helper.position.set(...item.p);helper.rotation.set(0,item.r??0,0);helper.scale.set(...item.s);helper.updateMatrix();mesh.setMatrixAt(i,helper.matrix)});mesh.instanceMatrix.needsUpdate=true;mesh.computeBoundingSphere();kit.value.add(mesh);meshes.push(mesh)}
+const chartCanvas=document.createElement('canvas');chartCanvas.width=768;chartCanvas.height=384
+const c=chartCanvas.getContext('2d')!;c.fillStyle='#111c20';c.fillRect(0,0,768,384);c.strokeStyle='#27383a';c.lineWidth=1
+for(let x=0;x<768;x+=96){c.beginPath();c.moveTo(x,0);c.lineTo(x,384);c.stroke()}for(let y=0;y<384;y+=64){c.beginPath();c.moveTo(0,y);c.lineTo(768,y);c.stroke()}
+c.strokeStyle='#64ad88';c.lineWidth=5;c.beginPath();[[0,280],[65,246],[130,258],[195,188],[260,224],[325,132],[390,157],[455,108],[520,145],[585,82],[650,118],[715,51],[768,68]].forEach(([x,y],i)=>i?c.lineTo(x,y):c.moveTo(x,y));c.stroke()
+const chart=new CanvasTexture(chartCanvas);chart.colorSpace=SRGBColorSpace
+const m={walnut:new MeshStandardMaterial({color:'#d3d0c6',roughness:.48}),edge:new MeshStandardMaterial({color:'#f0eee7',roughness:.42}),steel:new MeshStandardMaterial({color:'#3d4442',metalness:.62,roughness:.32}),bezel:new MeshStandardMaterial({color:'#202624',metalness:.2,roughness:.37}),display:new MeshStandardMaterial({map:chart,emissiveMap:chart,emissive:'#40654f',emissiveIntensity:.22,roughness:.36}),keyboard:new MeshStandardMaterial({color:'#d2d0c5',roughness:.48}),chair:new MeshStandardMaterial({color:'#39423f',roughness:.76}),pot:new MeshStandardMaterial({color:'#8f7860',roughness:.78}),leaf:new MeshStandardMaterial({color:'#536c50',roughness:.76})}
+function rebuild(){for(const mesh of meshes){kit.value.remove(mesh);mesh.geometry.dispose();mesh.dispose()}meshes.length=0;kit.value.clear();const d=props.desks
+ const top=new RoundedBoxGeometry(3.05,.14,1.32,4,.055),leg=new BoxGeometry(.075,.76,.075),apron=new BoxGeometry(2.45,.16,.1),monitor=new RoundedBoxGeometry(1.02,.9,.12,4,.035),panel=new PlaneGeometry(.9,.7),stem=new CylinderGeometry(.045,.065,.22,12),foot=new BoxGeometry(.38,.06,.18),keyboard=new RoundedBoxGeometry(.65,.035,.22,3,.012),mouse=new SphereGeometry(.09,12,8),seat=new RoundedBoxGeometry(.76,.16,.68,4,.07),back=new RoundedBoxGeometry(.72,.84,.15,4,.07),chairPost=new CylinderGeometry(.055,.075,.42,12),base=new CylinderGeometry(.13,.13,.08,16),spoke=new BoxGeometry(.72,.055,.07),wheel=new SphereGeometry(.085,10,8)
+ instances(top,m.walnut,d.map(v=>({p:[v.x,.8,v.z],s:[1,1,1],r:v.rotation})))
+ instances(new BoxGeometry(3.07,.035,1.34),m.edge,d.map(v=>({p:[v.x,.715,v.z],s:[1,1,1],r:v.rotation})))
+ instances(leg,m.steel,d.flatMap(v=>[-1,1].flatMap(x=>[-1,1].map(z=>({p:[v.x+x*1.34,.38,v.z+z*.54] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.rotation})))) )
+ instances(apron,m.steel,d.map(v=>({p:[v.x,.59,v.z-.46],s:[1,1,1],r:v.rotation})))
+ const screens=d.flatMap(v=>[-.52,.52].map(offset=>({p:[v.x+offset,1.42,v.z-.47] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.rotation})))
+ instances(monitor,m.bezel,screens)
+ instances(panel,m.display,screens.map(v=>({p:[v.p[0],v.p[1],v.p[2]+.065] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.r})))
+ instances(stem,m.steel,screens.map(v=>({p:[v.p[0],1.02,v.p[2]+.01] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.r})))
+ instances(foot,m.steel,screens.map(v=>({p:[v.p[0],.92,v.p[2]+.01] as [number,number,number],s:[1,1,1] as [number,number,number],r:v.r})))
+ instances(keyboard,m.keyboard,d.map(v=>({p:[v.x,.9,v.z+.24],s:[1,1,1],r:v.rotation})))
+ instances(mouse,m.keyboard,d.map(v=>({p:[v.x+.52,.91,v.z+.23],s:[1,.35,1],r:v.rotation})))
+ instances(seat,m.chair,d.map(v=>({p:[v.x,.49,v.z+1.42],s:[1,1,1],r:v.rotation})))
+ instances(back,m.chair,d.map(v=>({p:[v.x,.95,v.z+1.76],s:[1,1,1],r:v.rotation})))
+ instances(chairPost,m.steel,d.map(v=>({p:[v.x,.22,v.z+1.42],s:[1,1,1],r:v.rotation})))
+ instances(base,m.steel,d.map(v=>({p:[v.x,.055,v.z+1.42],s:[1,1,1],r:v.rotation})))
+ instances(spoke,m.steel,d.flatMap(v=>[0,Math.PI/3,-Math.PI/3,2*Math.PI/3,-2*Math.PI/3].map(r=>({p:[v.x,.07,v.z+1.42] as [number,number,number],s:[1,1,1] as [number,number,number],r}))))
+ instances(wheel,m.steel,d.flatMap(v=>[0,Math.PI/3,-Math.PI/3,2*Math.PI/3,-2*Math.PI/3].map(a=>({p:[v.x+Math.cos(a)*.36,.07,v.z+1.42+Math.sin(a)*.36] as [number,number,number],s:[1,1,1] as [number,number,number]}))))
+ const pots=props.plants
+ instances(new CylinderGeometry(.18,.22,.3,16),m.pot,pots.map(v=>({p:[v.x,.19,v.z],s:[1,1,1],r:v.rotation})))
+ instances(new CylinderGeometry(.025,.19,.74,8),m.leaf,pots.map(v=>({p:[v.x,.68,v.z],s:[1,1,1],r:v.rotation})))
+ instances(new SphereGeometry(.22,12,8),m.leaf,pots.map(v=>({p:[v.x,.96,v.z],s:[1.05,1.35,1.05],r:v.rotation})))
 }
 watch(()=>[props.desks,props.plants],rebuild,{deep:true,immediate:true})
-onBeforeUnmount(()=>{rebuild();graph.dispose();Object.values(materials).forEach(m=>m.dispose())})
+onBeforeUnmount(()=>{for(const mesh of meshes){kit.value.remove(mesh);mesh.geometry.dispose();mesh.dispose()}chart.dispose();Object.values(m).forEach(material=>material.dispose())})
 </script>
 <template><primitive :object="kit" :dispose="null"/></template>

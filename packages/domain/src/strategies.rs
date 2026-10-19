@@ -179,13 +179,34 @@ pub fn analyze(candles: &[Candle]) -> Decision {
     committee(signals)
 }
 pub fn committee(signals: Vec<Signal>) -> Decision {
-    // Trend and momentum have higher weight; reversal strategies can veto via negative scores.
-    let weights = [0.30, 0.10, 0.15, 0.10, 0.25, 0.10];
-    let score = signals
+    committee_with_weights(
+        signals,
+        &[
+            ("moving_average".to_owned(), 0.30),
+            ("rsi".to_owned(), 0.10),
+            ("macd".to_owned(), 0.15),
+            ("bollinger".to_owned(), 0.10),
+            ("momentum".to_owned(), 0.25),
+            ("breakout".to_owned(), 0.10),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+pub fn committee_with_weights(
+    signals: Vec<Signal>,
+    weights: &std::collections::HashMap<String, f64>,
+) -> Decision {
+    let active_weight: f64 = signals
         .iter()
-        .zip(weights)
-        .map(|(s, w)| s.score * w)
-        .sum::<f64>();
+        .map(|s| weights.get(&s.strategy).copied().unwrap_or(0.0).clamp(0.0, 2.0))
+        .sum();
+    let score = if active_weight > 0.0 {
+        signals.iter()
+            .map(|s| s.score * weights.get(&s.strategy).copied().unwrap_or(0.0).clamp(0.0, 2.0))
+            .sum::<f64>() / active_weight
+    } else { 0.0 };
     let action = if score >= 0.18 {
         "BUY"
     } else if score <= -0.18 {

@@ -14,6 +14,7 @@ x-worker: &worker
       condition: service_healthy
 x-worker-env: &worker-env
   DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+  OLLAMA_URL: http://ollama:11434
   TRADING_MODE: simulated
   INITIAL_BALANCE: ${INITIAL_BALANCE:-1000}
   ORDER_BUDGET: ${ORDER_BUDGET:-300}
@@ -23,6 +24,7 @@ x-worker-env: &worker-env
   MAX_DRAWDOWN: ${MAX_DRAWDOWN:-0.1}
   STOP_LOSS: ${STOP_LOSS:-0.025}
   TAKE_PROFIT: ${TAKE_PROFIT:-0.04}
+  TAKE_PROFIT_BRL: ${TAKE_PROFIT_BRL:-1}
   MAX_POSITIONS: ${MAX_POSITIONS:-5}
   FEE_BPS: ${FEE_BPS:-10}
   SPREAD_BPS: ${SPREAD_BPS:-2}
@@ -33,7 +35,6 @@ services:
     environment:
       <<: *worker-env
       WORKER_ROLE: market
-      SCANNER_TOP_N: ${SCANNER_TOP_N:-8}
       BINANCE_REST_URL: ${BINANCE_REST_URL:-https://data-api.binance.vision}
       BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://data-stream.binance.vision}
   risk:
@@ -51,15 +52,48 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+      OLLAMA_URL: http://ollama:11434
       NEWS_FEEDS: ${NEWS_FEEDS:-https://www.coindesk.com/arc/outboundfeeds/rss/}
       NEWS_ALLOWED_HOSTS: ${NEWS_ALLOWED_HOSTS:-www.coindesk.com,cointelegraph.com}
       NEWS_INTERVAL: ${NEWS_INTERVAL:-300}
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
-      AI_MODEL: ${AI_MODEL:-gpt-4.1-mini}
     depends_on:
       api:
         condition: service_healthy
+      ollama:
+        condition: service_started
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 24h
+      OLLAMA_MAX_LOADED_MODELS: 1
+      OLLAMA_NUM_PARALLEL: 1
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: [CMD-SHELL, 'ollama list >/dev/null 2>&1']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+  management:
+    build: ./services/management
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-900}
+      ORDER_BUDGET: ${ORDER_BUDGET:-300}
+    depends_on:
+      api:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   frontend:
     build: ./apps/office
     ports:
@@ -144,3 +178,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  ollama-models:
