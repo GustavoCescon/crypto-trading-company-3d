@@ -217,16 +217,12 @@ async fn ollama_committee(
     let schema = json!({"type":"object","properties":{"votes":{"type":"array","items":{"type":"object","properties":{
         "strategy":{"type":"string","enum":["moving_average","rsi","macd","bollinger","momentum","breakout"]},
         "score":{"type":"number","minimum":-1,"maximum":1},"reason":{"type":"string","maxLength":160}},
-        "required":["strategy","score","reason"],"additionalProperties":false},"minItems":6,"maxItems":6},
-        "market_agents":{"type":"array","items":{"type":"object","properties":{
-        "agent_id":{"type":"string","enum":["analyst_volume","analyst_liquidity","analyst_volatility","analyst_spread","analyst_momentum","analyst_trend","analyst_selection"]},
-        "score":{"type":"number","minimum":-1,"maximum":1},"opinion":{"type":"string","maxLength":120}},
-        "required":["agent_id","score","opinion"],"additionalProperties":false},"minItems":7,"maxItems":7}},
-        "required":["votes","market_agents"],"additionalProperties":false});
+        "required":["strategy","score","reason"],"additionalProperties":false},"minItems":6,"maxItems":6}},
+        "required":["votes"],"additionalProperties":false});
     let (market_data,): (Value,) = sqlx::query_as("SELECT data FROM rankings WHERE symbol=$1")
         .bind(symbol).fetch_one(pool).await?;
     let response = client.post(format!("{endpoint}/api/chat")).json(&json!({
-        "model":model,"stream":false,"format":schema,"options":{"temperature":0,"num_predict":500},
+        "model":model,"stream":false,"format":schema,"options":{"temperature":0,"num_ctx":4096,"num_predict":1200},
         "messages":[
             {"role":"system","content":"Voce coordena os seis agentes de estrategia e sete analistas de mercado. Cada agente avalia somente seu papel e deve retornar exatamente uma opiniao: seis votos de estrategia e sete market_agents. Scores vao de -1 (evitar/venda) a 1 (favoravel); use 0 se a evidência for insuficiente. Seja conservador e nao trate variacao isolada como sinal. Nunca emita ordens nem altere controles de risco."},
             {"role":"user","content":json!({"symbol":symbol,"strategy_agents":signals,"market_agents":{"volume":"analyst_volume avalia volume","liquidity":"analyst_liquidity avalia liquidez","volatility":"analyst_volatility avalia volatilidade","spread":"analyst_spread avalia custo do spread","momentum":"analyst_momentum avalia variacao","trend":"analyst_trend avalia tendencia","selection":"analyst_selection decide se o ativo merece acompanhamento"},"market_data":market_data}).to_string()}
@@ -383,6 +379,9 @@ async fn analyze_asset(pool: &PgPool, symbol: &str, llm: &reqwest::Client) -> Re
         }
     }
     tx.commit().await?;
+    sqlx::query("UPDATE agents SET state='MONITORING',heartbeat=now() WHERE id='committee'")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 async fn scan(
@@ -505,7 +504,20 @@ async fn scan(
     }
     for symbol in &symbols {
         history(pool, client, symbol).await?;
-        analyze_asset(pool, symbol, llm).await?;
+        if let Err(error) = analyze_asset(pool, symbol, llm).await {
+            tracing::warn!(%symbol, error=%error, "asset analysis failed; continuing with remaining candidates");
+            db::agent(
+                pool,
+                "committee",
+                "Helena",
+                "Presidente do comitÃª",
+                "committee",
+                "BLOCKED",
+                json!({"symbol":symbol,"error":error.to_string()}),
+            )
+            .await?;
+            continue;
+        }
         let c = db::candles(pool, symbol, 60).await?;
         if c.len() >= 60 {
             let n = c.len();
@@ -527,7 +539,6 @@ async fn scan(
         "bollinger",
         "momentum",
         "breakout",
-        "committee",
     ] {
         sqlx::query("UPDATE agents SET state='MONITORING',heartbeat=now() WHERE id=$1")
             .bind(id)

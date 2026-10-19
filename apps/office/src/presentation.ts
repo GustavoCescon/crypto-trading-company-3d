@@ -9,7 +9,14 @@ export function agentSummary(agent: Agent): string {
   if (agent.id==='execution') return agent.state==='EXECUTING'?'Estou registrando uma operação fictícia aprovada pelo risco.':'Estou aguardando o gerente de risco autorizar uma operação fictícia.'
   if (agent.id==='risk') return 'Estou acompanhando exposição, perdas, reservas e limites de risco da carteira.'
   if (agent.id==='audit') return 'Acompanho os registros de operações, reservas e patrimônio para auditoria.'
-  if (agent.id==='news') return 'Estou acompanhando notícias das fontes configuradas. Uma notícia isolada não autoriza operações.'
+  if (agent.room==='news') {
+    const sources = Array.isArray(detail.sources) ? detail.sources.map(String).map((url) => {
+      try { return new URL(url).hostname } catch { return url }
+    }) : []
+    return sources.length
+      ? `${agent.role}: pesquisando em ${sources.join(', ')}. A análise de notícias não autoriza operações.`
+      : `${agent.role}: aguardando fontes de pesquisa. A análise de notícias não autoriza operações.`
+  }
   if (agent.id==='scanner') return 'Estou classificando pares disponíveis por volume, liquidez, volatilidade e spread.'
   if (agent.id==='feed') return 'Estou recebendo cotações públicas para atualizar as análises e o acompanhamento de risco.'
   if (typeof detail.symbol === 'string') return `Estou analisando ${detail.symbol} com os critérios da minha especialidade.`

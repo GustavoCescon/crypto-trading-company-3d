@@ -53,9 +53,9 @@ services:
     environment:
       DATABASE_URL: postgres://ctc:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/ctc
       OLLAMA_URL: http://ollama:11434
-      NEWS_FEEDS: ${NEWS_FEEDS:-https://www.coindesk.com/arc/outboundfeeds/rss/}
-      NEWS_ALLOWED_HOSTS: ${NEWS_ALLOWED_HOSTS:-www.coindesk.com,cointelegraph.com}
-      NEWS_INTERVAL: ${NEWS_INTERVAL:-300}
+      NEWS_FEEDS: ${NEWS_FEEDS:-https://www.coindesk.com/arc/outboundfeeds/rss/,https://cointelegraph.com/rss,https://decrypt.co/feed,https://www.theblock.co/rss.xml,https://bitcoinmagazine.com/feed}
+      NEWS_ALLOWED_HOSTS: ${NEWS_ALLOWED_HOSTS:-www.coindesk.com,coindesk.com,cointelegraph.com,www.cointelegraph.com,decrypt.co,www.decrypt.co,www.theblock.co,theblock.co,bitcoinmagazine.com,www.bitcoinmagazine.com}
+      NEWS_INTERVAL: ${NEWS_INTERVAL:-120}
     depends_on:
       api:
         condition: service_healthy

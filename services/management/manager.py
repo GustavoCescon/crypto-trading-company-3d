@@ -59,7 +59,7 @@ def hardware_profile(client):
         response.raise_for_status()
         log("model_pull_completed", model=model)
     capacity = min(30, max(3, min(cores * 2, max(3, memory_mb // 700))))
-    review_minutes = 15 if capacity >= 20 else 30 if capacity >= 10 else 60
+    review_minutes = 2
     return model, memory_mb, cores, capacity, review_minutes
 
 
@@ -231,7 +231,9 @@ def ensure_model(client):
     with connect() as conn:
         baseline = conn.execute("SELECT count(*) FROM agents WHERE state<>'RETIRED' AND managed_by IS DISTINCT FROM 'director'").fetchone()[0]
         capacity = min(30, max(20, baseline) + resource_slots)
-        scanner_symbols = min(8, max(1, resource_slots // 4))
+        # Keep the radar useful on compact machines while remaining serial: the
+        # market worker and Ollama each process one asset at a time.
+        scanner_symbols = min(8, max(3, resource_slots // 4))
         conn.execute("""INSERT INTO ai_runtime_state(id,model,memory_mb,cpu_cores,max_agents,scanner_symbols,review_minutes)
             VALUES(1,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET model=EXCLUDED.model,
             memory_mb=EXCLUDED.memory_mb,cpu_cores=EXCLUDED.cpu_cores,max_agents=EXCLUDED.max_agents,
